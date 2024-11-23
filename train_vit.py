@@ -1,19 +1,22 @@
 import torch, torch.nn as nn, torchvision
-import argparse
+import argparse, tqdm
 from einops import rearrange, repeat
 from dataclasses import dataclass
 
 from transformer import Transformer, TransformerConfig
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 @dataclass
 class ViTConfig:
     image_size: int = 256
     patch_size: int = 16
     num_classes: int = 1000
-    n_layers: int = 12
+    n_layers: int = 10
     n_heads: int = 8
-    n_embd: int = 1024
+    n_embd: int = 768
     extra_tokens: int = 1
+    dropout: float = 0.25
 
     def __post_init__(self):
         self.n_patches = (self.image_size // self.patch_size) ** 2
@@ -26,7 +29,7 @@ class ViT(nn.Module):
         self.patch_proj = nn.Conv2d(in_channels=3, out_channels=args.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
         self.pos_emb = nn.Embedding(args.n_patches, args.n_embd)
         self.extra_emb = nn.Embedding(args.extra_tokens, args.n_embd)
-        self.transformer = Transformer(TransformerConfig(args.n_layers, args.n_heads, args.n_embd, args.n_patches + args.extra_tokens))
+        self.transformer = Transformer(TransformerConfig(args.n_layers, args.n_heads, args.n_embd, args.n_patches + args.extra_tokens, args.dropout))
 
     def forward(self, x):
         patch_emb = self.patch_proj(x)
@@ -37,35 +40,81 @@ class ViT(nn.Module):
         emb = torch.cat([extra_emb, patch_emb], dim=1)
         return self.transformer(emb)
 
+class ViTClassifier(nn.Module):
+    def __init__(self, vit_config: ViTConfig):
+        super(ViTClassifier, self).__init__()
+        self.vit = ViT(vit_config)
+        self.head = nn.Linear(vit_config.n_embd, vit_config.num_classes)
+    def forward(self, x):
+        return self.head(self.vit(x)[:,0])
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
+    parser.add_argument('--image_size', type=int, default=256)
     args = parser.parse_args()
 
-    transform = torchvision.transforms.Compose([
-        torchvision.transforms.Resize(256),
-        torchvision.transforms.CenterCrop(256),
+    train_transform = torchvision.transforms.Compose([
+        torchvision.transforms.Resize(args.image_size),
+        torchvision.transforms.RandomCrop(args.image_size),
+        torchvision.transforms.RandomHorizontalFlip(),
         torchvision.transforms.ToTensor(),
         torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    # train_set, valid_set = [torchvision.datasets.ImageNet(root=args.data_dir, split=split, transform=transform) for split in ['train', 'val']]
-    # train_loader = torch.utils.data.DataLoader(train_set, batch_size=8, shuffle=True)
-    # valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=16, shuffle=False)
+    transform = torchvision.transforms.Compose([
+        torchvision.transforms.Resize(args.image_size),
+        torchvision.transforms.CenterCrop(args.image_size),
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
 
-    vit = ViT(ViTConfig())
+    bs = 64
+    image_count = 1000000
 
-    images = torch.randn(2, 3, 256, 256)
+    train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=train_transform)
+    valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
 
-    pred = vit(images)
-    cls_out
-    print(f"{pred.shape=}")
-    exit(0)
+    # valid_images = (train_set[image_count-1][1]+1) * 50
+    # train_set = torch.utils.data.Subset(train_set, range(0, image_count))
+    # valid_set = torch.utils.data.Subset(valid_set, range(0, valid_images))
 
-    for images, labels in train_loader:
-        print(images.shape)
-        print(labels.shape)
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=bs, shuffle=True, num_workers=8, pin_memory=True)
+    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*bs, shuffle=False, num_workers=4, pin_memory=True)
 
-        pred = vit(images)
+    vit = ViTClassifier(ViTConfig(image_size=args.image_size)).to(device)
+    loss_fn = nn.CrossEntropyLoss()
+    optim = torch.optim.Adam(vit.parameters(), lr=1e-4)
 
-        break
+    print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_set)}, val_len={len(valid_set)}")
+
+    for epoch in range(100):
+        bar = tqdm.tqdm(train_loader)
+        train_loss = 0.
+        for images, labels in bar:
+            images, labels = images.to(device), labels.to(device)
+            optim.zero_grad()
+            pred = vit(images)
+            loss = loss_fn(pred, labels)
+            train_loss += loss.item()
+            loss.backward()
+            optim.step()
+            bar.set_description(f"e={epoch} loss={loss.item():.3f}")
+        train_loss /= len(train_loader)
+
+        with torch.no_grad():
+            val_loss, acc = 0., 0.
+            for images, labels in valid_loader:
+                images, labels = images.to(device), labels.to(device)
+                vit.eval()
+                pred = vit(images)
+                vit.train()
+                val_loss += loss_fn(pred, labels).item()
+                acc += (pred.argmax(dim=-1) == labels).float().mean().item()
+            val_loss /= len(valid_loader)
+            acc /= len(valid_loader)
+            print(f"epoch {epoch}: trn_loss={train_loss:.3f} val_loss={val_loss:.3f}, acc={acc:.3f}")
+
+
+
+

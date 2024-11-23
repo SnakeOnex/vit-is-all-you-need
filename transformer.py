@@ -8,6 +8,7 @@ class TransformerConfig:
     n_heads: int
     n_embd: int
     block_size: int
+    dropout: float = 0.1
     def __post_init__(self):
         self.head_dim = self.n_embd // self.n_heads
 
@@ -16,12 +17,12 @@ class Attention(nn.Module):
         super(Attention, self).__init__()
         for k, v in config.__dict__.items(): setattr(self, k, v)
         self.qkv = nn.Linear(self.n_embd, self.n_embd * 3)
-        self.register_buffer("attn_mask", ~torch.tril(torch.ones(config.block_size, config.block_size, dtype=torch.bool)))
+        # self.register_buffer("attn_mask", ~torch.tril(torch.ones(config.block_size, config.block_size, dtype=torch.bool)))
     def forward(self, x):
         q, k, v = rearrange(self.qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.n_heads)
         attn = q @ k.transpose(-2,-1) * (1/self.head_dim)**0.5
-        attn.masked_fill_(self.attn_mask, float("-inf"))
-        out = attn.softmax(dim=-1) @ v
+        # attn.masked_fill_(self.attn_mask, float("-inf"))
+        out = F.dropout(attn.softmax(dim=-1), self.dropout, self.training) @ v
         return rearrange(out, "b h n d -> b n (h d)", h=self.n_heads)
 
 class TransformerLayer(nn.Module):
@@ -33,6 +34,7 @@ class TransformerLayer(nn.Module):
             nn.Linear(self.n_embd, 4 * self.n_embd),
             nn.GELU(),
             nn.Linear(4 * self.n_embd, self.n_embd),
+            nn.Dropout(self.dropout)
         )
     def forward(self, x):
         x = x + self.multi_attn(F.layer_norm(x, (self.n_embd,)))
