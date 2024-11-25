@@ -9,6 +9,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 @dataclass
 class ViTConfig:
     image_size: int = 256
+    in_channels: int = 3
     patch_size: int = 16
     n_layers: int = 12
     n_heads: int = 12
@@ -21,11 +22,10 @@ class ViTConfig:
         self.patch_dim = 3 * self.patch_size ** 2
 
 class ViT(nn.Module):
-    def __init__(self, args: ViTConfig, _patch_proj=None):
+    def __init__(self, args: ViTConfig):
         super(ViT, self).__init__()
         self.config = args
-        if _patch_proj is not None: self.patch_proj = _patch_proj
-        else: self.patch_proj = nn.Conv2d(in_channels=3, out_channels=args.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
+        self.patch_proj = nn.Conv2d(in_channels=args.in_channels, out_channels=args.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
         self.pos_emb = nn.Embedding(args.n_patches, args.n_embd)
         self.extra_emb = nn.Embedding(args.extra_tokens, args.n_embd)
         self.transformer = Transformer(TransformerConfig(args.n_layers, args.n_heads, args.n_embd, args.n_patches + args.extra_tokens, args.dropout))
