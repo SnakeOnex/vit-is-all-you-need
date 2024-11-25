@@ -1,10 +1,9 @@
 import torch, torch.nn as nn, torchvision
-import argparse, tqdm
+import argparse, tqdm, wandb
 from einops import rearrange, repeat
 from dataclasses import dataclass
 
 from transformer import Transformer, TransformerConfig
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 @dataclass
@@ -12,8 +11,8 @@ class ViTConfig:
     image_size: int = 256
     patch_size: int = 16
     num_classes: int = 1000
-    n_layers: int = 10
-    n_heads: int = 8
+    n_layers: int = 12
+    n_heads: int = 12
     n_embd: int = 768
     extra_tokens: int = 1
     dropout: float = 0.25
@@ -23,7 +22,7 @@ class ViTConfig:
         self.patch_dim = 3 * self.patch_size ** 2
 
 class ViT(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args: ViTConfig):
         super(ViT, self).__init__()
         self.config = args
         self.patch_proj = nn.Conv2d(in_channels=3, out_channels=args.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
@@ -51,8 +50,12 @@ class ViTClassifier(nn.Module):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
-    parser.add_argument('--image_size', type=int, default=256)
+    parser.add_argument('--image_size', type=int, default=128)
+    parser.add_argument('--bs', type=int, default=128)
     args = parser.parse_args()
+    vit_config = ViTConfig(image_size=args.image_size)
+
+    wandb.init(project="vit-classifier", config=vit_config.__dict__)
 
     train_transform = torchvision.transforms.Compose([
         torchvision.transforms.Resize(args.image_size),
@@ -69,29 +72,24 @@ if __name__ == '__main__':
         torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    bs = 64
-    image_count = 1000000
-
     train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=train_transform)
     valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
 
-    # valid_images = (train_set[image_count-1][1]+1) * 50
-    # train_set = torch.utils.data.Subset(train_set, range(0, image_count))
-    # valid_set = torch.utils.data.Subset(valid_set, range(0, valid_images))
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, prefetch_factor=2)
+    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*args.bs, shuffle=False, num_workers=4, pin_memory=True)
 
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=bs, shuffle=True, num_workers=8, pin_memory=True)
-    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*bs, shuffle=False, num_workers=4, pin_memory=True)
-
-    vit = ViTClassifier(ViTConfig(image_size=args.image_size)).to(device)
+    vit = ViTClassifier(vit_config).to(device)
     loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.Adam(vit.parameters(), lr=1e-4)
+    optim = torch.optim.Adam(vit.parameters(), lr=1e-4, weight_decay=1e-3)
 
     print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_set)}, val_len={len(valid_set)}")
+    print(f"PARAMS: {vit_config}")
 
+    best_acc = 0.
     for epoch in range(100):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
-        for images, labels in bar:
+        for i, (images, labels) in enumerate(bar):
             images, labels = images.to(device), labels.to(device)
             optim.zero_grad()
             pred = vit(images)
@@ -100,6 +98,7 @@ if __name__ == '__main__':
             loss.backward()
             optim.step()
             bar.set_description(f"e={epoch} loss={loss.item():.3f}")
+            if i % 10: wandb.log({"train/loss": loss.item()})
         train_loss /= len(train_loader)
 
         with torch.no_grad():
@@ -114,7 +113,8 @@ if __name__ == '__main__':
             val_loss /= len(valid_loader)
             acc /= len(valid_loader)
             print(f"epoch {epoch}: trn_loss={train_loss:.3f} val_loss={val_loss:.3f}, acc={acc:.3f}")
-
-
-
+            wandb.log({"valid/loss": loss.item(), "valid/acc": acc})
+            if acc > best_acc:
+                best_acc = acc
+                torch.save(vit.state_dict(), "vit.pth")
 
