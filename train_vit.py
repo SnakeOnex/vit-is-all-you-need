@@ -10,7 +10,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class ViTConfig:
     image_size: int = 256
     patch_size: int = 16
-    num_classes: int = 1000
     n_layers: int = 12
     n_heads: int = 12
     n_embd: int = 768
@@ -40,10 +39,10 @@ class ViT(nn.Module):
         return self.transformer(emb)
 
 class ViTClassifier(nn.Module):
-    def __init__(self, vit_config: ViTConfig):
+    def __init__(self, vit_config: ViTConfig, num_classes=1000):
         super(ViTClassifier, self).__init__()
         self.vit = ViT(vit_config)
-        self.head = nn.Linear(vit_config.n_embd, vit_config.num_classes)
+        self.head = nn.Linear(vit_config.n_embd, num_classes)
     def forward(self, x):
         return self.head(self.vit(x)[:,0])
 
