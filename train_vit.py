@@ -50,8 +50,8 @@ class ViTClassifier(nn.Module):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
-    parser.add_argument('--image_size', type=int, default=128)
-    parser.add_argument('--bs', type=int, default=128)
+    parser.add_argument('--image_size', type=int, default=256)
+    parser.add_argument('--bs', type=int, default=64)
     args = parser.parse_args()
     vit_config = ViTConfig(image_size=args.image_size)
 
