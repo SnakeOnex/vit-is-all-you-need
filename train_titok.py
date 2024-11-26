@@ -3,6 +3,7 @@ import argparse, tqdm, wandb
 from einops import rearrange, repeat
 from dataclasses import dataclass
 
+from utils import *
 from transformer import Transformer, TransformerConfig
 from train_vit import ViTConfig, ViT
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -39,11 +40,15 @@ class Quantizer(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(Quantizer, self).__init__()
         self.codebook = nn.Embedding(titok_config.codebook_size, titok_config.latent_dim)
+        self.codebook.weight.data.uniform_(-1.0 / titok_config.codebook_size, 1.0 / titok_config.codebook_size)
     def forward(self, x):
         nearest_neighbors = torch.cdist(x, self.codebook.weight)
         indices = nearest_neighbors.argmin(dim=-1)
         quantized = x + (self.codebook(indices) - x).detach()
-        return quantized, indices
+        codebook_loss = (quantized - x.detach()).pow(2).mean()
+        commitment_loss = (quantized.detach() - x).pow(2).mean()
+        quantize_loss = codebook_loss + commitment_loss
+        return quantized, indices, quantize_loss
 
 class TiTokDecoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
@@ -58,53 +63,13 @@ class TiTokDecoder(nn.Module):
         self.vit = ViT(vit_config)
         self.embd_proj = nn.Conv2d(vit_config.n_embd, 16*16*3, kernel_size=1)
     def forward(self, x):
-        print(f"{x.shape=}")
         x = self.quant_proj(x)
-        print(f"{x.shape=}")
         x = rearrange(x, 'b h c -> b c h 1')
-        print(f"{x.shape=}")
         out_embd = self.vit(x)
-        print(f"{out_embd.shape=}")
         out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//16, w=self.config.image_sz//16)
-        print(f"{out_embd.shape=}")
         image = self.embd_proj(out_embd)
-        print(f"{image.shape=}")
         image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=16, p2=16)
-        print(f"{image.shape=}")
-        exit(0)
-        out_embd = self.vit(x)
-        exit(0)
-        print(f"{out_embd.shape=}")
-        exit(0)
-        # out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//16, w=self.config.image_sz//16)
-        print(f"{out_embd.shape=}")
-        exit(0)
-
-# class ViT(nn.Module):
-#     def __init__(self, args: ViTConfig):
-#         super(ViT, self).__init__()
-#         self.config = args
-#         # self.patch_proj = nn.Linear(args.wi
-#         self.pos_emb = nn.Embedding(args.n_patches, args.n_embd)
-#         self.extra_emb = nn.Embedding(args.extra_tokens, args.n_embd)
-#         self.transformer = Transformer(TransformerConfig(args.n_layers, args.n_heads, args.n_embd, args.n_patches + args.extra_tokens, args.dropout))
-#
-#     def forward(self, x):
-#         patch_emb = self.patch_proj(x)
-#         patch_emb = rearrange(patch_emb, 'b c h w -> b (h w) c')
-#         patch_emb = patch_emb + self.pos_emb(torch.arange(self.config.n_patches, device=patch_emb.device))
-#
-#         extra_emb = repeat(self.extra_emb.weight, 'n d -> b n d', b=x.shape[0])
-#         emb = torch.cat([extra_emb, patch_emb], dim=1)
-#         return self.transformer(emb)
-
-
-class TiTok(nn.Module):
-    def __init__(self, titok_config: TiTokConfig, vit_config: ViTConfig):
-        super(TiTok, self).__init__()
-        self.vit_encoder = ViT(vit_config, extra_tokens=titok_config.latent_tokens)
-    def forward(self, x):
-        pass
+        return image
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -135,20 +100,32 @@ if __name__ == '__main__':
     titok_dec = TiTokDecoder(titok_config).to(device)
 
     images = torch.randn(2, 3, args.image_size, args.image_size).to(device)
-    latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
-    print(f"{latent_embs.shape=}")
-    quantized, indices = quantizer(latent_embs)
-    print(f"{quantized.shape=}, {indices.shape=}")
-    image_recon = titok_dec(quantized)
-    print(f"{image_recon.shape=}")
+
+    recon_loss_fn = nn.MSELoss()
+    codebook_loss_fn = nn.CrossEntropyLoss()
+    # optim = torch.optim.Adam(vit.parameters(), lr=1e-4, weight_decay=1e-3)
+    params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
+    optim = torch.optim.Adam(params, lr=1e-4, weight_decay=1e-3)
+
+    print(f"STATS: enc_params={get_params_str(titok_enc)}, \
+            dec_params={get_params_str(titok_dec)}")
+            # trn_len={len(train_set)}, val_len={len(valid_set)}")
+    # print(f"PARAMS: {vit_config}")
+    for i in range(5):
+        optim.zero_grad()
+        latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
+        print(f"{latent_embs.shape=}")
+        quantized, indices, quantize_loss = quantizer(latent_embs)
+        print(f"{quantized.shape=}, {indices.shape=}")
+        image_recon = titok_dec(quantized)
+        print(f"{image_recon.shape=}")
+        recon_loss = torch.mean(torch.abs(image_recon - images))
+        loss = recon_loss + quantize_loss
+        print(loss.item())
+        print(f"loss={loss.item()}, recon_loss={recon_loss.item()}, quant_loss={quantize_loss.item()}")
+        loss.backward()
+        optim.step()
     exit(0)
-
-    loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.Adam(vit.parameters(), lr=1e-4, weight_decay=1e-3)
-
-
-    print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_set)}, val_len={len(valid_set)}")
-    print(f"PARAMS: {vit_config}")
 
     best_acc = 0.
     for epoch in range(100):
