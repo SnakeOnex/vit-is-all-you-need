@@ -89,11 +89,11 @@ if __name__ == '__main__':
         torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    # train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=transform)
-    # valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
-    #
-    # train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, prefetch_factor=2)
-    # valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*args.bs, shuffle=False, num_workers=4, pin_memory=True)
+    train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=transform)
+    valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
+
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, prefetch_factor=2)
+    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*args.bs, shuffle=False, num_workers=4, pin_memory=True)
 
     titok_enc = TiTokEncoder(titok_config).to(device)
     quantizer = Quantizer(titok_config).to(device)
@@ -108,24 +108,8 @@ if __name__ == '__main__':
     optim = torch.optim.Adam(params, lr=1e-4, weight_decay=1e-3)
 
     print(f"STATS: enc_params={get_params_str(titok_enc)}, \
-            dec_params={get_params_str(titok_dec)}")
-            # trn_len={len(train_set)}, val_len={len(valid_set)}")
-    # print(f"PARAMS: {vit_config}")
-    for i in range(5):
-        optim.zero_grad()
-        latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
-        print(f"{latent_embs.shape=}")
-        quantized, indices, quantize_loss = quantizer(latent_embs)
-        print(f"{quantized.shape=}, {indices.shape=}")
-        image_recon = titok_dec(quantized)
-        print(f"{image_recon.shape=}")
-        recon_loss = torch.mean(torch.abs(image_recon - images))
-        loss = recon_loss + quantize_loss
-        print(loss.item())
-        print(f"loss={loss.item()}, recon_loss={recon_loss.item()}, quant_loss={quantize_loss.item()}")
-        loss.backward()
-        optim.step()
-    exit(0)
+            dec_params={get_params_str(titok_dec)} \
+            trn_len={len(train_set)}, val_len={len(valid_set)}")
 
     best_acc = 0.
     for epoch in range(100):
@@ -134,12 +118,14 @@ if __name__ == '__main__':
         for i, (images, labels) in enumerate(bar):
             images, labels = images.to(device), labels.to(device)
             optim.zero_grad()
-            pred = vit(images)
-            loss = loss_fn(pred, labels)
-            train_loss += loss.item()
+            latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
+            quantized, indices, quantize_loss = quantizer(latent_embs)
+            image_recon = titok_dec(quantized)
+            recon_loss = torch.mean(torch.abs(image_recon - images))
+            loss = recon_loss + quantize_loss
             loss.backward()
             optim.step()
-            bar.set_description(f"e={epoch} loss={loss.item():.3f}")
+            bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
             if i % 10 == 0: wandb.log({"train/loss": loss.item()})
         train_loss /= len(train_loader)
 
@@ -148,9 +134,13 @@ if __name__ == '__main__':
             for images, labels in valid_loader:
                 images, labels = images.to(device), labels.to(device)
                 vit.eval()
-                pred = vit(images)
+                latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
+                quantized, indices, quantize_loss = quantizer(latent_embs)
+                image_recon = titok_dec(quantized)
+                recon_loss = torch.mean(torch.abs(image_recon - images))
+                loss = recon_loss + quantize_loss
+                val_loss += loss.item()
                 vit.train()
-                val_loss += loss_fn(pred, labels).item()
                 acc += (pred.argmax(dim=-1) == labels).float().mean().item()
             val_loss /= len(valid_loader)
             acc /= len(valid_loader)
