@@ -16,8 +16,6 @@ class TiTokConfig:
     codebook_size: int = 512
     latent_dim: int = 12
 
-# image(3, 128, 128) -> TiTokEncoder(128/16^2, n_embed) -> latent(latent_tokens, latent_dim) -> Quantizer(latent_tokens, latent_dim) -> TiTokDecoder(128/16^2, n_embed) -> image(3, 128, 128)
-
 class TiTokEncoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokEncoder, self).__init__()
@@ -27,7 +25,6 @@ class TiTokEncoder(nn.Module):
     def forward(self, x):
         out_embd = self.vit(x)
         latent_embd = self.proj(out_embd)
-        print(latent_embd.shape)
         return latent_embd
 
 class Quantizer(nn.Module):
@@ -49,15 +46,13 @@ class TiTokDecoder(nn.Module):
         super(TiTokDecoder, self).__init__()
         self.config = titok_config
         vit_config = ViTConfig(image_size=titok_config.image_sz, extra_tokens=(titok_config.image_sz//16)**2)
-        self.quant_proj = nn.Linear(titok_config.latent_dim, vit_config.n_embd)
-        # vit_config = ViTConfig(image_size=titok_config.image_sz, extra_tokens=titok_config.latent_tokens)
         vit_config.patch_size = 1
         vit_config.in_channels = vit_config.n_embd
         vit_config.n_patches = titok_config.latent_tokens
+        self.quant_proj = nn.Linear(titok_config.latent_dim, vit_config.n_embd)
         self.vit = ViT(vit_config)
         self.embd_proj = nn.Conv2d(vit_config.n_embd, 16*16*3, kernel_size=1)
     def forward(self, x):
-        print(f"{x.shape=}")
         x = self.quant_proj(x)
         x = rearrange(x, 'b h c -> b c h 1')
         out_embd = self.vit(x)[:,:8*8]
@@ -92,7 +87,6 @@ if __name__ == '__main__':
 
     titok_enc = TiTokEncoder(titok_config).to(device)
     quantizer = Quantizer(titok_config).to(device)
-    quantizer_titok = VectorQuantizer().to(device)
     titok_dec = TiTokDecoder(titok_config).to(device)
 
     params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
@@ -120,7 +114,11 @@ if __name__ == '__main__':
             optim.step()
             bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
             if i % 10 == 0: wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item()})
-            if i % 500 == 0: wandb.log({"train/image": wandb.Image(images[i%24].detach().cpu().numpy().transpose(1,2,0))})
-            if i % 500 == 0: wandb.log({"train/recon": wandb.Image(image_recon[i%24].detach().cpu().numpy().transpose(1,2,0))})
+            if i % 500 == 0: wandb.log({"train/image": wandb.Image(images[0].detach().cpu().numpy().transpose(1,2,0))})
+            if i % 50 == 0: 
+                # wandb.log({"train/recon": wandb.Image(image_recon[0].detach().cpu().numpy().transpose(1,2,0))})
+                images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
+                recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
+                wandb.log({"images": images, "reconstructions": recons})
         train_loss /= len(train_loader)
 
