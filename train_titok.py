@@ -1,11 +1,9 @@
 import torch, torch.nn as nn, torchvision
 import argparse, tqdm, wandb
-from einops import rearrange, repeat
+from einops import rearrange
 from dataclasses import dataclass
-from typing import Tuple, Mapping, Text
 
 from utils import *
-from transformer import Transformer, TransformerConfig
 from train_vit import ViTConfig, ViT
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -114,9 +112,7 @@ if __name__ == '__main__':
             optim.step()
             bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
             if i % 10 == 0: wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item()})
-            if i % 500 == 0: wandb.log({"train/image": wandb.Image(images[0].detach().cpu().numpy().transpose(1,2,0))})
-            if i % 50 == 0: 
-                # wandb.log({"train/recon": wandb.Image(image_recon[0].detach().cpu().numpy().transpose(1,2,0))})
+            if i % 500 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
                 wandb.log({"images": images, "reconstructions": recons})
