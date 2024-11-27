@@ -106,7 +106,7 @@ if __name__ == '__main__':
             quantized, indices, quantize_loss = quantizer(latent_embs)
             image_recon = titok_dec(quantized)
 
-            recon_loss = nn.functional.mse_loss(image_recon, images)
+            recon_loss = (image_recon - images).abs().mean()
             loss = recon_loss + quantize_loss
             loss.backward()
             optim.step()
