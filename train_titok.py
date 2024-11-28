@@ -1,5 +1,5 @@
-import torch, torch.nn as nn, torchvision
 import argparse, tqdm, wandb
+import torch, torch.nn as nn, torchvision, lpips
 from einops import rearrange
 from dataclasses import dataclass
 
@@ -11,7 +11,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class TiTokConfig:
     image_sz: int = 128
     latent_tokens: int = 256
-    codebook_size: int = 512
+    codebook_size: int = 2048
     latent_dim: int = 12
 
 class TiTokEncoder(nn.Module):
@@ -50,6 +50,7 @@ class TiTokDecoder(nn.Module):
         self.quant_proj = nn.Linear(titok_config.latent_dim, vit_config.n_embd)
         self.vit = ViT(vit_config)
         self.embd_proj = nn.Conv2d(vit_config.n_embd, 16*16*3, kernel_size=1)
+        self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper
     def forward(self, x):
         x = self.quant_proj(x)
         x = rearrange(x, 'b h c -> b c h 1')
@@ -57,6 +58,7 @@ class TiTokDecoder(nn.Module):
         out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//16, w=self.config.image_sz//16)
         image = self.embd_proj(out_embd)
         image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=16, p2=16)
+        image = self.conv_out(image)
         return image
 
 if __name__ == '__main__':
@@ -74,7 +76,8 @@ if __name__ == '__main__':
         torchvision.transforms.Resize(args.image_size),
         torchvision.transforms.CenterCrop(args.image_size),
         torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        # torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=transform)
@@ -89,6 +92,7 @@ if __name__ == '__main__':
 
     params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
     optim = torch.optim.Adam(params, lr=1e-4)
+    lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
 
     print(f"STATS: enc_params={get_params_str(titok_enc)}, \
             dec_params={get_params_str(titok_dec)} \
@@ -98,6 +102,7 @@ if __name__ == '__main__':
     for epoch in range(10000):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
+        codebook_usage = torch.zeros([titok_config.codebook_size], device=device)
         for i, (images, labels) in enumerate(bar):
             images, labels = images.to(device), labels.to(device)
             optim.zero_grad()
@@ -106,15 +111,21 @@ if __name__ == '__main__':
             quantized, indices, quantize_loss = quantizer(latent_embs)
             image_recon = titok_dec(quantized)
 
-            recon_loss = (image_recon - images).abs().mean()
+            l1_loss = (image_recon - images).abs().mean()
+            perceptual_loss = lpips_loss_fn(image_recon, images).mean()
+            recon_loss = l1_loss + perceptual_loss
             loss = recon_loss + quantize_loss
             loss.backward()
             optim.step()
+            codebook_usage[indices] = 1
             bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
-            if i % 10 == 0: wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item()})
+            if i % 10 == 0: 
+                wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item()})
             if i % 500 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
-                wandb.log({"images": images, "reconstructions": recons})
+                codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
+                codebook_usage *= 0
+                wandb.log({"images": images, "reconstructions": recons, "train/codebook_usage": codebook_usage_val})
         train_loss /= len(train_loader)
 
