@@ -1,5 +1,5 @@
 import torch, torch.nn as nn, torchvision
-import argparse, tqdm, wandb
+import argparse, tqdm, wandb, time
 from einops import rearrange, repeat
 from dataclasses import dataclass
 
@@ -89,16 +89,20 @@ if __name__ == '__main__':
     for epoch in range(100):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
+        st = time.time()
         for i, (images, labels) in enumerate(bar):
             images, labels = images.to(device), labels.to(device)
+            load_time = time.time() - st
             optim.zero_grad()
             pred = vit(images)
             loss = loss_fn(pred, labels)
             train_loss += loss.item()
             loss.backward()
             optim.step()
-            bar.set_description(f"e={epoch} loss={loss.item():.3f}")
-            if i % 10: wandb.log({"train/loss": loss.item()})
+            step_time = time.time() - st - load_time
+            bar.set_description(f"e={epoch} loss={loss.item():.3f}, load_time={load_time:.3f}, step_time={step_time:.3f}")
+            if i % 10: wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time})
+            st = time.time()
         train_loss /= len(train_loader)
 
         with torch.no_grad():
