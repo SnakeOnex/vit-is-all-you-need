@@ -19,8 +19,9 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(self.n_embd, self.n_embd * 3)
     def forward(self, x):
         q, k, v = rearrange(self.qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.n_heads)
-        attn = q @ k.transpose(-2,-1) * (1/self.head_dim)**0.5
-        out = F.dropout(attn.softmax(dim=-1), self.dropout, self.training) @ v
+        # attn = q @ k.transpose(-2,-1) * (1/self.head_dim)**0.5
+        # out = F.dropout(attn.softmax(dim=-1), self.dropout, self.training) @ v
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
         return rearrange(out, "b h n d -> b n (h d)", h=self.n_heads)
 
 class TransformerLayer(nn.Module):
