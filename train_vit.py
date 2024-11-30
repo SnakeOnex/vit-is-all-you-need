@@ -1,10 +1,15 @@
 import torch, torch.nn as nn, torchvision
 import argparse, tqdm, wandb, time
 from einops import rearrange, repeat
+from torch.amp import autocast, GradScaler
 from dataclasses import dataclass
-
 from transformer import Transformer, TransformerConfig
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
 
 @dataclass
 class ViTConfig:
@@ -15,7 +20,7 @@ class ViTConfig:
     n_heads: int = 12
     n_embd: int = 768
     extra_tokens: int = 1
-    dropout: float = 0.25
+    dropout: float = 0.15
 
     def __post_init__(self):
         self.n_patches = (self.image_size // self.patch_size) ** 2
@@ -52,6 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
     parser.add_argument('--image_size', type=int, default=256)
     parser.add_argument('--bs', type=int, default=64)
+    parser.add_argument('--mixed', type=bool, default=True)
     args = parser.parse_args()
     vit_config = ViTConfig(image_size=args.image_size)
 
@@ -62,14 +68,14 @@ if __name__ == '__main__':
         torchvision.transforms.RandomCrop(args.image_size),
         torchvision.transforms.RandomHorizontalFlip(),
         torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     transform = torchvision.transforms.Compose([
         torchvision.transforms.Resize(args.image_size),
         torchvision.transforms.CenterCrop(args.image_size),
         torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=train_transform)
@@ -81,27 +87,32 @@ if __name__ == '__main__':
     vit = ViTClassifier(vit_config).to(device)
     loss_fn = nn.CrossEntropyLoss()
     optim = torch.optim.Adam(vit.parameters(), lr=1e-4, weight_decay=1e-3)
+    scaler = GradScaler(enabled=args.mixed)
+
+    # torch.compile(vit, mode="max-autotune")
 
     print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_set)}, val_len={len(valid_set)}")
     print(f"PARAMS: {vit_config}")
 
     best_acc = 0.
     for epoch in range(100):
-        bar = tqdm.tqdm(train_loader)
+        bar = tqdm.tqdm(train_loader, disable=True)
         train_loss = 0.
         st = time.time()
         for i, (images, labels) in enumerate(bar):
             images, labels = images.to(device), labels.to(device)
             load_time = time.time() - st
             optim.zero_grad()
-            pred = vit(images)
-            loss = loss_fn(pred, labels)
+            with autocast("cuda", enabled=args.mixed):
+                pred = vit(images)
+                loss = loss_fn(pred, labels)
             train_loss += loss.item()
-            loss.backward()
-            optim.step()
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
             step_time = time.time() - st - load_time
-            bar.set_description(f"e={epoch} loss={loss.item():.3f}, load_time={load_time:.3f}, step_time={step_time:.3f}")
-            if i % 10: wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time})
+            if i % 100: wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time})
+            bar.set_description(f"e={epoch} load_time={load_time:.3f}, step_time={step_time:.3f}")
             st = time.time()
         train_loss /= len(train_loader)
 
