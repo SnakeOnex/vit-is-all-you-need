@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from utils import *
 from train_vit import ViTConfig, ViT
+from datasets import get_imagenet_loaders
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -16,6 +17,7 @@ torch.backends.cudnn.deterministic = False
 @dataclass
 class TiTokConfig:
     image_sz: int = 128
+    patch_size: int = 16
     latent_tokens: int = 256
     codebook_size: int = 2048
     latent_dim: int = 12
@@ -24,7 +26,7 @@ class TiTokEncoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokEncoder, self).__init__()
         self.latent_tokens = titok_config.latent_tokens
-        self.vit = ViT(ViTConfig(image_size=titok_config.image_sz, extra_tokens=titok_config.latent_tokens))
+        self.vit = ViT(ViTConfig(image_size=titok_config.image_sz, patch_size=titok_config.patch_size, extra_tokens=titok_config.latent_tokens))
         self.proj = nn.Linear(self.vit.config.n_embd, titok_config.latent_dim)
     def forward(self, x):
         out_embd = self.vit(x)
@@ -57,27 +59,26 @@ class TiTokDecoder(nn.Module):
         vit_config.n_patches = titok_config.latent_tokens
         self.quant_proj = nn.Linear(titok_config.latent_dim, vit_config.n_embd)
         self.vit = ViT(vit_config)
-        self.embd_proj = nn.Conv2d(vit_config.n_embd, 16*16*3, kernel_size=1)
+        self.embd_proj = nn.Conv2d(vit_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
         self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper
     def forward(self, x):
         x = self.quant_proj(x)
         x = rearrange(x, 'b h c -> b c h 1')
-        out_embd = self.vit(x)[:,:8*8]
-        out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//16, w=self.config.image_sz//16)
+        out_embd = self.vit(x)[:,:(self.config.image_sz//self.config.patch_size)**2]
+        out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//self.config.patch_size, w=self.config.image_sz//self.config.patch_size)
         image = self.embd_proj(out_embd)
-        image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=16, p2=16)
+        image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=self.config.patch_size, p2=self.config.patch_size)
         image = self.conv_out(image)
         return image
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
     parser.add_argument('--image_size', type=int, default=128)
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--min_lr', type=float, default=1e-5)
-    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--train_steps', type=int, default=200000)
     args = parser.parse_args()
@@ -86,23 +87,11 @@ if __name__ == '__main__':
 
     wandb.init(project="titok", config=titok_config.__dict__ | vit_config.__dict__ | args.__dict__)
 
-    transform = torchvision.transforms.Compose([
-        torchvision.transforms.Resize(args.image_size),
-        torchvision.transforms.RandomCrop(args.image_size),
-        torchvision.transforms.RandomHorizontalFlip(),
-        torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=transform)
-    valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
-
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, prefetch_factor=2)
-    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*args.bs, shuffle=False, num_workers=4, pin_memory=True)
-
     titok_enc = TiTokEncoder(titok_config).to(device)
     quantizer = Quantizer(titok_config).to(device)
     titok_dec = TiTokDecoder(titok_config).to(device)
+
+    train_loader, valid_loader = get_imagenet_loaders(args.image_size, args.bs)
 
     params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
     optim = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
@@ -115,7 +104,7 @@ if __name__ == '__main__':
 
     print(f"STATS: enc_params={get_params_str(titok_enc)}, \
             dec_params={get_params_str(titok_dec)} \
-            trn_len={len(train_set)}, val_len={len(valid_set)}")
+            trn_len={len(train_loader.dataset)}, val_len={len(valid_loader.dataset)}")
 
     best_acc = 0.
     for epoch in range(10000):
@@ -146,7 +135,7 @@ if __name__ == '__main__':
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
                 wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
-            if i % 1000 == 0: 
+            if i % 5000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
                 codebook_usage *= 0

@@ -58,6 +58,11 @@ if __name__ == '__main__':
     parser.add_argument('--image_size', type=int, default=256)
     parser.add_argument('--bs', type=int, default=64)
     parser.add_argument('--mixed', type=bool, default=True)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--min_lr', type=float, default=1e-5)
+    parser.add_argument('--weight_decay', type=float, default=1e-2)
+    parser.add_argument('--warmup_steps', type=int, default=5000)
+    parser.add_argument('--train_steps', type=int, default=200000)
     args = parser.parse_args()
     vit_config = ViTConfig(image_size=args.image_size)
 
@@ -86,7 +91,10 @@ if __name__ == '__main__':
 
     vit = ViTClassifier(vit_config).to(device)
     loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.Adam(vit.parameters(), lr=1e-4, weight_decay=1e-3)
+    optim = torch.optim.AdamW(vit.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, args.train_steps, eta_min=args.min_lr)
+    warmup_sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: min(1, s / args.warmup_steps))
+    lr_sched = torch.optim.lr_scheduler.SequentialLR(optim, [warmup_sched, cos_lr_sched], [args.warmup_steps])
     scaler = GradScaler(enabled=args.mixed)
 
     # torch.compile(vit, mode="max-autotune")
@@ -110,6 +118,7 @@ if __name__ == '__main__':
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
+            lr_sched.step()
             step_time = time.time() - st - load_time
             if i % 100: wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time})
             bar.set_description(f"e={epoch} load_time={load_time:.3f}, step_time={step_time:.3f}")
