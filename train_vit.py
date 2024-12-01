@@ -3,7 +3,8 @@ import argparse, tqdm, wandb, time
 from einops import rearrange, repeat
 from torch.amp import autocast, GradScaler
 from dataclasses import dataclass
-from transformer import Transformer, TransformerConfig
+from transformer import Transformer, transformer_configs
+from datasets import get_imagenet_loaders
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -16,25 +17,23 @@ class ViTConfig:
     image_size: int = 256
     in_channels: int = 3
     patch_size: int = 16
-    n_layers: int = 12
-    n_heads: int = 12
-    n_embd: int = 768
+    transformer: str = "B"
     extra_tokens: int = 1
     dropout: float = 0.15
 
     def __post_init__(self):
         self.n_patches = (self.image_size // self.patch_size) ** 2
         self.patch_dim = 3 * self.patch_size ** 2
+        self.trans_config = transformer_configs[self.transformer](block_size=self.n_patches + self.extra_tokens, dropout=self.dropout)
 
 class ViT(nn.Module):
     def __init__(self, args: ViTConfig):
         super(ViT, self).__init__()
         self.config = args
-        self.patch_proj = nn.Conv2d(in_channels=args.in_channels, out_channels=args.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
-        self.pos_emb = nn.Embedding(args.n_patches, args.n_embd)
-        self.extra_emb = nn.Embedding(args.extra_tokens, args.n_embd)
-        self.transformer = Transformer(TransformerConfig(args.n_layers, args.n_heads, args.n_embd, args.n_patches + args.extra_tokens, args.dropout))
-
+        self.patch_proj = nn.Conv2d(in_channels=args.in_channels, out_channels=args.trans_config.n_embd, kernel_size=args.patch_size, stride=args.patch_size)
+        self.pos_emb = nn.Embedding(args.n_patches, args.trans_config.n_embd)
+        self.extra_emb = nn.Embedding(args.extra_tokens, args.trans_config.n_embd)
+        self.transformer = Transformer(args.trans_config)
     def forward(self, x):
         patch_emb = self.patch_proj(x)
         patch_emb = rearrange(patch_emb, 'b c h w -> b (h w) c')
@@ -48,7 +47,7 @@ class ViTClassifier(nn.Module):
     def __init__(self, vit_config: ViTConfig, num_classes=1000):
         super(ViTClassifier, self).__init__()
         self.vit = ViT(vit_config)
-        self.head = nn.Linear(vit_config.n_embd, num_classes)
+        self.head = nn.Linear(vit_config.trans_config.n_embd, num_classes)
     def forward(self, x):
         return self.head(self.vit(x)[:,0])
 
@@ -68,26 +67,7 @@ if __name__ == '__main__':
 
     wandb.init(project="vit-classifier", config=vit_config.__dict__)
 
-    train_transform = torchvision.transforms.Compose([
-        torchvision.transforms.Resize(args.image_size),
-        torchvision.transforms.RandomCrop(args.image_size),
-        torchvision.transforms.RandomHorizontalFlip(),
-        torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    transform = torchvision.transforms.Compose([
-        torchvision.transforms.Resize(args.image_size),
-        torchvision.transforms.CenterCrop(args.image_size),
-        torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    train_set = torchvision.datasets.ImageNet(root=args.data_dir, split="train", transform=train_transform)
-    valid_set = torchvision.datasets.ImageNet(root=args.data_dir, split="val", transform=transform)
-
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, prefetch_factor=2)
-    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=2*args.bs, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader, valid_loader = get_imagenet_loaders(args.image_size, args.bs)
 
     vit = ViTClassifier(vit_config).to(device)
     loss_fn = nn.CrossEntropyLoss()
@@ -99,12 +79,12 @@ if __name__ == '__main__':
 
     # torch.compile(vit, mode="max-autotune")
 
-    print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_set)}, val_len={len(valid_set)}")
+    print(f"STATS: params={sum(p.numel() for p in vit.parameters())/1e6:.1f}M, trn_len={len(train_loader.dataset)}, val_len={len(valid_loader.dataset)}")
     print(f"PARAMS: {vit_config}")
 
     best_acc = 0.
     for epoch in range(100):
-        bar = tqdm.tqdm(train_loader, disable=True)
+        bar = tqdm.tqdm(train_loader, disable=False)
         train_loss = 0.
         st = time.time()
         for i, (images, labels) in enumerate(bar):

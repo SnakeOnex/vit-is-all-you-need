@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from utils import *
 from train_vit import ViTConfig, ViT
-from datasets import get_imagenet_loaders
+from datasets import get_imagenet_loaders, get_dmlab_image_loaders
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -16,18 +16,34 @@ torch.backends.cudnn.deterministic = False
 
 @dataclass
 class TiTokConfig:
-    image_sz: int = 128
-    patch_size: int = 16
-    latent_tokens: int = 256
-    codebook_size: int = 2048
-    latent_dim: int = 12
+    image_size: int
+    patch_size: int
+    latent_tokens: int
+    codebook_size: int
+    latent_dim: int
+    transformer: str
+    def __post_init__(self):
+        self.patch_dim = self.image_size // self.patch_size
+        self.n_patches = self.patch_dim**2
+        self.enc_vit_config = ViTConfig(
+                image_size=self.image_size, 
+                patch_size=self.patch_size, 
+                extra_tokens=self.latent_tokens,
+                transformer=self.transformer)
+        self.n_embd = self.enc_vit_config.trans_config.n_embd
+        self.dec_vit_config = ViTConfig(
+                patch_size=1, 
+                in_channels=self.n_embd, 
+                extra_tokens=self.n_patches,
+                transformer=self.transformer)
+        self.dec_vit_config.n_patches = self.latent_tokens
 
 class TiTokEncoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokEncoder, self).__init__()
         self.latent_tokens = titok_config.latent_tokens
-        self.vit = ViT(ViTConfig(image_size=titok_config.image_sz, patch_size=titok_config.patch_size, extra_tokens=titok_config.latent_tokens))
-        self.proj = nn.Linear(self.vit.config.n_embd, titok_config.latent_dim)
+        self.vit = ViT(titok_config.enc_vit_config)
+        self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
         out_embd = self.vit(x)
         latent_embd = self.proj(out_embd)
@@ -53,19 +69,15 @@ class TiTokDecoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokDecoder, self).__init__()
         self.config = titok_config
-        vit_config = ViTConfig(image_size=titok_config.image_sz, extra_tokens=(titok_config.image_sz//16)**2)
-        vit_config.patch_size = 1
-        vit_config.in_channels = vit_config.n_embd
-        vit_config.n_patches = titok_config.latent_tokens
-        self.quant_proj = nn.Linear(titok_config.latent_dim, vit_config.n_embd)
-        self.vit = ViT(vit_config)
-        self.embd_proj = nn.Conv2d(vit_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
+        self.vit = ViT(titok_config.dec_vit_config)
+        self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
+        self.embd_proj = nn.Conv2d(titok_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
         self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper
     def forward(self, x):
         x = self.quant_proj(x)
         x = rearrange(x, 'b h c -> b c h 1')
-        out_embd = self.vit(x)[:,:(self.config.image_sz//self.config.patch_size)**2]
-        out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.image_sz//self.config.patch_size, w=self.config.image_sz//self.config.patch_size)
+        out_embd = self.vit(x)[:,:self.config.n_patches]
+        out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.patch_dim, w=self.config.patch_dim)
         image = self.embd_proj(out_embd)
         image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=self.config.patch_size, p2=self.config.patch_size)
         image = self.conv_out(image)
@@ -74,6 +86,11 @@ class TiTokDecoder(nn.Module):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_size', type=int, default=128)
+    parser.add_argument('--patch_size', type=int, default=16)
+    parser.add_argument('--latent_tokens', type=int, default=256)
+    parser.add_argument('--codebook_size', type=int, default=2048)
+    parser.add_argument('--latent_dim', type=int, default=12)
+    parser.add_argument('--transformer', type=str, default='B')
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -81,17 +98,24 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--train_steps', type=int, default=200000)
+    parser.add_argument('--dataset', type=str, default='imagenet')
     args = parser.parse_args()
-    vit_config = ViTConfig(image_size=args.image_size, dropout=0.0)
-    titok_config = TiTokConfig(image_sz=args.image_size)
+    titok_config = TiTokConfig(args.image_size, args.patch_size, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
 
-    wandb.init(project="titok", config=titok_config.__dict__ | vit_config.__dict__ | args.__dict__)
+    if args.dataset == 'imagenet':
+        project_name = 'titok'
+        train_loader, _ = get_imagenet_loaders(args.image_size, args.bs)
+    elif args.dataset == 'dmlab':
+        assert args.image_size == 64
+        project_name = 'titok-dmlab'
+        train_loader, _ = get_dmlab_image_loaders(args.bs)
+
+    wandb.init(project=project_name, config=titok_config.__dict__ | args.__dict__)
 
     titok_enc = TiTokEncoder(titok_config).to(device)
     quantizer = Quantizer(titok_config).to(device)
     titok_dec = TiTokDecoder(titok_config).to(device)
 
-    train_loader, valid_loader = get_imagenet_loaders(args.image_size, args.bs)
 
     params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
     optim = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
@@ -103,17 +127,17 @@ if __name__ == '__main__':
     lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
 
     print(f"STATS: enc_params={get_params_str(titok_enc)}, \
-            dec_params={get_params_str(titok_dec)} \
-            trn_len={len(train_loader.dataset)}, val_len={len(valid_loader.dataset)}")
+            dec_params={get_params_str(titok_dec)}")
+            # train_len={len(train_loader.dataset)}")
 
-    best_acc = 0.
+    best_recon = 0.
     for epoch in range(10000):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
         codebook_usage = torch.zeros([titok_config.codebook_size], device=device)
         st = time.time()
-        for i, (images, labels) in enumerate(bar):
-            images, labels = images.to(device), labels.to(device)
+        for i, (images, _) in enumerate(bar):
+            images = images.to(device)
             load_time = time.time() - st
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
@@ -135,6 +159,9 @@ if __name__ == '__main__':
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
                 wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
+                if recon_loss.item() < best_recon:
+                    best_recon = recon_loss.item()
+                    torch.save(nn.ModuleDict({"enc": titok_enc, "quant": quantizer, "dec": titok_dec}).state_dict(), f"titok_best.pt")
             if i % 5000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]

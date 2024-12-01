@@ -48,3 +48,18 @@ class Transformer(nn.Module):
     def forward(self, x):
         for layer in self.layers: x = layer(x)
         return x
+
+def S(**kwargs):
+    return TransformerConfig(n_layers=6, n_heads=8, n_embd=512, **kwargs)
+
+def B(**kwargs):
+    return TransformerConfig(n_layers=12, n_heads=12, n_embd=768, **kwargs)
+
+def L(**kwargs):
+    return TransformerConfig(n_layers=24, n_heads=16, n_embd=1024, **kwargs)
+
+transformer_configs = {
+    "S": S,
+    "B": B,
+    "L": L
+}
