@@ -73,17 +73,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
     parser.add_argument('--image_size', type=int, default=128)
-    parser.add_argument('--bs', type=int, default=48)
+    parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--min_lr', type=float, default=1e-5)
+    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--warmup_steps', type=int, default=5000)
+    parser.add_argument('--train_steps', type=int, default=200000)
     args = parser.parse_args()
-    vit_config = ViTConfig(image_size=args.image_size)
+    vit_config = ViTConfig(image_size=args.image_size, dropout=0.0)
     titok_config = TiTokConfig(image_sz=args.image_size)
 
     wandb.init(project="titok", config=titok_config.__dict__ | vit_config.__dict__ | args.__dict__)
 
     transform = torchvision.transforms.Compose([
         torchvision.transforms.Resize(args.image_size),
-        torchvision.transforms.CenterCrop(args.image_size),
+        torchvision.transforms.RandomCrop(args.image_size),
+        torchvision.transforms.RandomHorizontalFlip(),
         torchvision.transforms.ToTensor(),
         torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -99,9 +105,13 @@ if __name__ == '__main__':
     titok_dec = TiTokDecoder(titok_config).to(device)
 
     params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
-    optim = torch.optim.Adam(params, lr=1e-4)
-    lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
+    optim = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, args.train_steps, eta_min=args.min_lr)
+    warmup_sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: min(1, s / args.warmup_steps))
+    lr_sched = torch.optim.lr_scheduler.SequentialLR(optim, [warmup_sched, cos_lr_sched], [args.warmup_steps])
     scaler = GradScaler(enabled=args.mixed)
+
+    lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
 
     print(f"STATS: enc_params={get_params_str(titok_enc)}, \
             dec_params={get_params_str(titok_dec)} \
@@ -129,11 +139,12 @@ if __name__ == '__main__':
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
+            lr_sched.step()
             step_time = time.time() - st - load_time
             codebook_usage[indices] = 1
             if i % 100 == 0: 
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
-                wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time})
+                wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
             if i % 1000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
