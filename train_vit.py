@@ -17,7 +17,7 @@ class ViTConfig:
     image_size: int = 256
     in_channels: int = 3
     patch_size: int = 16
-    transformer: str = "B"
+    transformer: str = "L"
     extra_tokens: int = 1
     dropout: float = 0.15
 
@@ -61,7 +61,7 @@ if __name__ == '__main__':
     parser.add_argument('--min_lr', type=float, default=1e-5)
     parser.add_argument('--weight_decay', type=float, default=1e-2)
     parser.add_argument('--warmup_steps', type=int, default=5000)
-    parser.add_argument('--train_steps', type=int, default=200000)
+    parser.add_argument('--train_steps', type=int, default=500000)
     args = parser.parse_args()
     vit_config = ViTConfig(image_size=args.image_size)
 
