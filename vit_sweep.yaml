@@ -1,0 +1,22 @@
+program: train_vit.py
+method: grid
+metric: 
+  name: valid/acc
+  goal: maximize
+parameters:
+  epochs:
+    value: 1
+  lr: 
+    values: [1e-3, 5e-4, 1e-4, 5e-5]
+  weight_decay:
+    values: [1e-3, 1e-2, 1e-1]
+  dropout:
+    values: [0, 0.1, 0.2]
+  image_size:
+    value: 256
+  transformer:
+    values: ['S', 'L']
+command:
+  - python
+  - ${program}
+  - ${args}
