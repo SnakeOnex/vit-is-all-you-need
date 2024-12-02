@@ -64,12 +64,12 @@ if __name__ == '__main__':
     parser.add_argument('--bs', type=int, default=64)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--min_lr', type=float, default=1e-5)
     parser.add_argument('--weight_decay', type=float, default=1e-2)
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--train_steps', type=int, default=500000)
     parser.add_argument('--epochs', type=int, default=float('inf'))
     args = parser.parse_args()
+    args.min_lr = args.lr / 10
     vit_config = ViTConfig(args.image_size, args.in_channels, args.patch_size, args.transformer, args.extra_tokens, args.dropout)
 
     run_name=f"{args.patch_size}px_{args.image_size}px_{args.transformer}_{args.bs}bs_{args.lr}lr_{args.dropout}drp"
