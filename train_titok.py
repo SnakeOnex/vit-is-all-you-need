@@ -73,15 +73,31 @@ class TiTokDecoder(nn.Module):
         self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
         self.embd_proj = nn.Conv2d(titok_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
         self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper
-    def forward(self, x):
-        x = self.quant_proj(x)
-        x = rearrange(x, 'b h c -> b c h 1')
-        out_embd = self.vit(x)[:,:self.config.n_patches]
+    def forward(self, z):
+        z = self.quant_proj(z)
+        z = rearrange(z, 'b h c -> b c h 1')
+        out_embd = self.vit(z)[:,:self.config.n_patches]
         out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.patch_dim, w=self.config.patch_dim)
         image = self.embd_proj(out_embd)
         image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=self.config.patch_size, p2=self.config.patch_size)
         image = self.conv_out(image)
         return image
+
+class TiTok(nn.Module):
+    def __init__(self, titok_config: TiTokConfig):
+        super(TiTok, self).__init__()
+        self.config = titok_config
+        self.enc = TiTokEncoder(titok_config)
+        self.quant = Quantizer(titok_config)
+        self.dec = TiTokDecoder(titok_config)
+    def encode(self, z): return self.quant(self.enc(z))
+    def decode(self, z_quant): return self.dec(z_quant)
+    def decode_indices(self, indices): return self.dec(self.quant.codebook(indices))
+    def forward(self, x):
+        latent_embs = self.enc(x)[:,:self.config.latent_tokens]
+        quantized, indices, quantize_loss = self.quant(latent_embs)
+        image_recon = self.dec(quantized)
+        return image_recon, indices, quantize_loss
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -109,26 +125,19 @@ if __name__ == '__main__':
         assert args.image_size == 64
         project_name = 'titok-dmlab'
         train_loader, _ = get_dmlab_image_loaders(args.bs)
+    run_name=f"{args.patch_size}px_{args.image_size}px_{args.transformer}_{args.latent_tokens}_{args.codebook_size}"
 
-    wandb.init(project=project_name, config=titok_config.__dict__ | args.__dict__)
+    wandb.init(project=project_name, name=run_name, config=titok_config.__dict__ | args.__dict__)
 
-    titok_enc = TiTokEncoder(titok_config).to(device)
-    quantizer = Quantizer(titok_config).to(device)
-    titok_dec = TiTokDecoder(titok_config).to(device)
+    titok = TiTok(titok_config).to(device)
 
-
-    params = list(titok_enc.parameters()) + list(quantizer.parameters()) + list(titok_dec.parameters())
-    optim = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
-    cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, args.train_steps, eta_min=args.min_lr)
-    warmup_sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: min(1, s / args.warmup_steps))
-    lr_sched = torch.optim.lr_scheduler.SequentialLR(optim, [warmup_sched, cos_lr_sched], [args.warmup_steps])
+    optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
     lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
 
-    print(f"STATS: enc_params={get_params_str(titok_enc)}, \
-            dec_params={get_params_str(titok_dec)}")
-            # train_len={len(train_loader.dataset)}")
+    print(f"STATS: enc_params={get_params_str(titok)}")
 
     best_recon = 0.
     for epoch in range(10000):
@@ -141,10 +150,7 @@ if __name__ == '__main__':
             load_time = time.time() - st
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
-                latent_embs = titok_enc(images)[:,:titok_config.latent_tokens]
-                quantized, indices, quantize_loss = quantizer(latent_embs)
-                image_recon = titok_dec(quantized)
-
+                image_recon, indices, quantize_loss = titok(images)
                 l1_loss = (image_recon - images).abs().mean()
                 perceptual_loss = lpips_loss_fn(image_recon, images).mean()
                 recon_loss = l1_loss + perceptual_loss
@@ -161,7 +167,7 @@ if __name__ == '__main__':
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
-                    torch.save(nn.ModuleDict({"enc": titok_enc, "quant": quantizer, "dec": titok_dec}).state_dict(), f"titok_best.pt")
+                    torch.save(titok.state_dict(), f"titok_best_{run_name}.pth")
             if i % 5000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]

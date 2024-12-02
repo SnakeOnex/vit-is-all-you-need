@@ -5,6 +5,7 @@ from torch.amp import autocast, GradScaler
 from dataclasses import dataclass
 from transformer import Transformer, transformer_configs
 from datasets import get_imagenet_loaders
+from utils import get_lr_scheduler
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -72,9 +73,7 @@ if __name__ == '__main__':
     vit = ViTClassifier(vit_config).to(device)
     loss_fn = nn.CrossEntropyLoss()
     optim = torch.optim.AdamW(vit.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    cos_lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, args.train_steps, eta_min=args.min_lr)
-    warmup_sched = torch.optim.lr_scheduler.LambdaLR(optim, lambda s: min(1, s / args.warmup_steps))
-    lr_sched = torch.optim.lr_scheduler.SequentialLR(optim, [warmup_sched, cos_lr_sched], [args.warmup_steps])
+    lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
     # torch.compile(vit, mode="max-autotune")
