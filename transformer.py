@@ -19,8 +19,6 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(self.n_embd, self.n_embd * 3)
     def forward(self, x):
         q, k, v = rearrange(self.qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.n_heads)
-        # attn = q @ k.transpose(-2,-1) * (1/self.head_dim)**0.5
-        # out = F.dropout(attn.softmax(dim=-1), self.dropout, self.training) @ v
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
         return rearrange(out, "b h n d -> b n (h d)", h=self.n_heads)
 
@@ -49,17 +47,7 @@ class Transformer(nn.Module):
         for layer in self.layers: x = layer(x)
         return x
 
-def S(**kwargs):
-    return TransformerConfig(n_layers=6, n_heads=8, n_embd=512, **kwargs)
-
-def B(**kwargs):
-    return TransformerConfig(n_layers=12, n_heads=12, n_embd=768, **kwargs)
-
-def L(**kwargs):
-    return TransformerConfig(n_layers=24, n_heads=16, n_embd=1024, **kwargs)
-
-transformer_configs = {
-    "S": S,
-    "B": B,
-    "L": L
-}
+def S(**kwargs): return TransformerConfig(n_layers=6, n_heads=8, n_embd=512, **kwargs)
+def B(**kwargs): return TransformerConfig(n_layers=12, n_heads=12, n_embd=768, **kwargs)
+def L(**kwargs): return TransformerConfig(n_layers=24, n_heads=16, n_embd=1024, **kwargs)
+transformer_configs = {"S": S, "B": B, "L": L}
