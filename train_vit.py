@@ -15,12 +15,12 @@ torch.backends.cudnn.deterministic = False
 
 @dataclass
 class ViTConfig:
-    image_size: int = 256
-    in_channels: int = 3
-    patch_size: int = 16
-    transformer: str = "L"
-    extra_tokens: int = 1
-    dropout: float = 0.15
+    image_size: int
+    in_channels: int
+    patch_size: int
+    transformer: str
+    extra_tokens: int
+    dropout: float
 
     def __post_init__(self):
         self.n_patches = (self.image_size // self.patch_size) ** 2
@@ -56,6 +56,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='/mnt/data/Public_datasets/imagenet/imagenet_pytorch')
     parser.add_argument('--image_size', type=int, default=256)
+    parser.add_argument('--in_channels', type=int, default=3)
+    parser.add_argument('--patch_size', type=int, default=16)
+    parser.add_argument('--extra_tokens', type=int, default=1)
+    parser.add_argument('--transformer', type=str, default="L")
+    parser.add_argument('--dropout', type=float, default=0.15)
     parser.add_argument('--bs', type=int, default=64)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -63,10 +68,12 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-2)
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--train_steps', type=int, default=500000)
+    parser.add_argument('--epochs', type=int, default=float('inf'))
     args = parser.parse_args()
-    vit_config = ViTConfig(image_size=args.image_size)
+    vit_config = ViTConfig(args.image_size, args.in_channels, args.patch_size, args.transformer, args.extra_tokens, args.dropout)
 
-    wandb.init(project="vit-classifier", config=vit_config.__dict__)
+    run_name=f"{args.patch_size}px_{args.image_size}px_{args.transformer}_{args.bs}bs_{args.lr}lr_{args.dropout}drp"
+    wandb.init(project="vit-classifier", name=run_name, config=vit_config.__dict__)
 
     train_loader, valid_loader = get_imagenet_loaders(args.image_size, args.bs)
 
@@ -82,7 +89,7 @@ if __name__ == '__main__':
     print(f"PARAMS: {vit_config}")
 
     best_acc = 0.
-    for epoch in range(100):
+    for epoch in range(args.epochs):
         bar = tqdm.tqdm(train_loader, disable=False)
         train_loss = 0.
         st = time.time()
