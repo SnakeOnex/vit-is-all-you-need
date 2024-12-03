@@ -25,17 +25,9 @@ class TiTokConfig:
     def __post_init__(self):
         self.patch_dim = self.image_size // self.patch_size
         self.n_patches = self.patch_dim**2
-        self.enc_vit_config = ViTConfig(
-                image_size=self.image_size, 
-                patch_size=self.patch_size, 
-                extra_tokens=self.latent_tokens,
-                transformer=self.transformer)
+        self.enc_vit_config = ViTConfig(self.image_size, 3, self.patch_size, self.transformer, self.latent_tokens, 0.0)
         self.n_embd = self.enc_vit_config.trans_config.n_embd
-        self.dec_vit_config = ViTConfig(
-                patch_size=1, 
-                in_channels=self.n_embd, 
-                extra_tokens=self.n_patches,
-                transformer=self.transformer)
+        self.dec_vit_config = ViTConfig(self.latent_tokens, self.n_embd, 1, self.transformer, self.n_patches, 0.0)
         self.dec_vit_config.n_patches = self.latent_tokens
 
 class TiTokEncoder(nn.Module):
@@ -110,12 +102,13 @@ if __name__ == '__main__':
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--min_lr', type=float, default=1e-5)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=5000)
-    parser.add_argument('--train_steps', type=int, default=200000)
+    parser.add_argument('--train_steps', type=int, default=500000)
     parser.add_argument('--dataset', type=str, default='imagenet')
+    parser.add_argument('--epochs', type=int, default=float('inf'))
     args = parser.parse_args()
+    args.min_lr = args.lr / 10.
     titok_config = TiTokConfig(args.image_size, args.patch_size, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
 
     if args.dataset == 'imagenet':
@@ -140,7 +133,7 @@ if __name__ == '__main__':
     print(f"STATS: enc_params={get_params_str(titok)}")
 
     best_recon = 0.
-    for epoch in range(10000):
+    for epoch in range(args.epochs):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
         codebook_usage = torch.zeros([titok_config.codebook_size], device=device)
@@ -163,7 +156,7 @@ if __name__ == '__main__':
             codebook_usage[indices] = 1
             if i % 100 == 0: 
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
-                wandb.log({"train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
+                wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()

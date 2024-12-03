@@ -1,0 +1,26 @@
+program: train_titok.py
+method: grid
+metric: 
+  name: train/recon_loss
+  goal: maximize
+parameters:
+  latent_tokens:
+    values: [8, 16, 32, 64]
+  codebook_size: 
+    values: [512, 1024]
+command:
+  - python
+  - ${program}
+  - --dataset
+  - "dmlab"
+  - --epochs 
+  - "10"
+  - --image_size 
+  - "64" 
+  - --bs 
+  - "128" 
+  - --transformer 
+  - "S" 
+  - --lr 
+  - "1e-4"
+  - ${args}
