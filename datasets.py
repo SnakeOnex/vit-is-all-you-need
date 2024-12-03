@@ -29,13 +29,11 @@ def get_imagenet_loaders(image_size, bs, data_dir='/mnt/data/Public_datasets/ima
 
 
 class DmlabDataset(Dataset):
-    def __init__(self, dataset_path, image_mode):
-        self.image_mode = image_mode
+    def __init__(self, dataset_path):
         self.video_paths = []
         for folder_path in Path(dataset_path).iterdir():
             for video_path in folder_path.iterdir():
                 self.video_paths.append(video_path)
-
     def __len__(self): return len(self.video_paths)
     def __getitem__(self, idx):
         data = np.load(self.video_paths[idx])
@@ -43,12 +41,10 @@ class DmlabDataset(Dataset):
         video = (torch.from_numpy(video).float() / 255) * 2 - 1
         video = video.permute(0, 3, 1, 2)
         action = torch.from_numpy(action)
-        if self.image_mode:
-            video = video[torch.randint(0, video.shape[0], (1,))].squeeze(0)
         return video, action
 
 # very simple dataloader that samples random frames from random videos
-def video_dataloader(dataset, batch_size, videos_per_batch=4):
+def video_dataloader(dataset, batch_size, videos_per_batch=8):
     while True:
         # 1. fetch videos_per_batch videos
         videos = torch.stack([dataset[i][0] for i in np.random.choice(len(dataset), videos_per_batch)])
@@ -59,6 +55,11 @@ def video_dataloader(dataset, batch_size, videos_per_batch=4):
         yield frames, None
 
 def get_dmlab_image_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
-    dataset = DmlabDataset(dataset_path, image_mode=False)
+    dataset = DmlabDataset(dataset_path)
     loader = video_dataloader(dataset, batch_size)
+    return loader, None
+
+def get_dmlab_video_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
+    dataset = DmlabDataset(dataset_path)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
     return loader, None
