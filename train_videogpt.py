@@ -113,15 +113,11 @@ if __name__ == '__main__':
             B, T, C, H, W = videos.shape
 
             # 1. encode video into tokens
-            videos = rearrange(videos, 'b t c h w -> (b t) c h w')
-            with torch.no_grad(): tokens = titok.encode(videos)
+            with torch.no_grad(): 
+                tokens = titok.encode(rearrange(videos, 'b t c h w -> (b t) c h w'))
             tokens = rearrange(tokens, '(b t) n -> b t n', b=B)
             load_time = time.time() - st
-            tokens = tokens[:, :1]
-            print(tokens.shape)
-            with torch.no_grad(): 
-                video_gpt.generate_frames(tokens, n=3)
-            exit(0)
+            # exit(0)
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
                 _, loss = video_gpt(tokens)
@@ -133,7 +129,16 @@ if __name__ == '__main__':
             if i % 100 == 0: 
                 wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr'], "train/epoch": epoch})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f}")
-            # if i % 5000 == 0: 
+            if i % 50 == 0: 
+                video_unrolled = rearrange(videos, 'b t c h w -> b h (t w) c')
+                wandb.log({"video": wandb.Image(video_unrolled[0].detach().cpu().numpy())})
+                with torch.no_grad(): 
+                    gen_tokens = video_gpt.generate_frames(tokens[:,:1], n=3)
+                    gen_tokens = rearrange(gen_tokens, 'b (t n) -> (b t) n', t=T)
+                    gen_video = titok.decode_indices(gen_tokens)
+                    gen_video = rearrange(gen_video, '(b t) c h w -> b t c h w', b=B)
+                    gen_video_unrolled = rearrange(gen_video, 'b t c h w -> b h (t w) c')
+                    wandb.log({"gen_video": wandb.Image(gen_video_unrolled[0].detach().cpu().numpy())})
             #     images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
             #     recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
             #     codebook_usage *= 0
