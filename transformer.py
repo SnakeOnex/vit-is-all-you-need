@@ -8,18 +8,24 @@ class TransformerConfig:
     n_heads: int
     n_embd: int
     block_size: int
-    dropout: float = 0.1
+    causal: bool = False
+    dropout: float = 0.0
     def __post_init__(self):
         self.head_dim = self.n_embd // self.n_heads
 
 class Attention(nn.Module):
     def __init__(self, config: TransformerConfig):
         super(Attention, self).__init__()
+        if "causal" not in config.__dict__: config.causal = False #HACK: for backwards compatibility with old configs
         for k, v in config.__dict__.items(): setattr(self, k, v)
         self.qkv = nn.Linear(self.n_embd, self.n_embd * 3)
+        if self.causal:
+            mask = torch.triu(torch.ones(config.block_size, config.block_size), diagonal=1)
+            mask = mask.masked_fill(mask == 1, float('-inf'))  # Convert 1s to -inf
+            self.register_buffer("mask", mask)
     def forward(self, x):
         q, k, v = rearrange(self.qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.n_heads)
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout, attn_mask=self.mask if self.causal else None)
         return rearrange(out, "b h n d -> b n (h d)", h=self.n_heads)
 
 class TransformerLayer(nn.Module):
