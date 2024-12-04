@@ -49,7 +49,17 @@ class VideoGPT(nn.Module):
         x = torch.cat([sos, y[:,:-1]], dim=-1)
         x = self.tok_embed(x) + self.pos_embed(torch.arange(T*N, device=x.device))
         logits = self.transformer(x)
-        return F.cross_entropy(rearrange(logits, 'b s d -> (b s) d'), rearrange(y, 'b s -> (b s)'))
+        loss = F.cross_entropy(rearrange(logits, 'b s d -> (b s) d'), rearrange(y, 'b s -> (b s)'))
+        return logits, loss
+    def generate(self, tokens, n=1):
+        for _ in range(n):
+            sos = torch.zeros([tokens.shape[0], 1], device=tokens.device, dtype=torch.long) + self.config.codebook_size
+            x = torch.cat([sos, tokens], dim=-1)
+            x = self.tok_embed(x) + self.pos_embed(torch.arange(x.shape[1], device=x.device))
+            logits = self.transformer(x)
+            next_token = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
+            tokens = torch.cat([tokens, next_token], dim=-1)
+        return tokens
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -103,9 +113,15 @@ if __name__ == '__main__':
             with torch.no_grad(): tokens = titok.encode(videos)
             tokens = rearrange(tokens, '(b t) n -> b t n', b=B)
             load_time = time.time() - st
+            tokens = tokens[:, :1]
+            print(tokens.shape)
+            with torch.no_grad(): 
+                out_tokens = video_gpt.generate(rearrange(tokens, 'b t n -> b (t n)'), n=5)
+                print(out_tokens.shape)
+            exit(0)
             optim.zero_grad()
-            # with autocast("cuda", enabled=args.mixed):
-            loss = video_gpt(tokens)
+            with autocast("cuda", enabled=args.mixed):
+                _, loss = video_gpt(tokens)
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()

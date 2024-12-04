@@ -25,7 +25,7 @@ class Attention(nn.Module):
             self.register_buffer("mask", mask)
     def forward(self, x):
         q, k, v = rearrange(self.qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.n_heads)
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout, attn_mask=self.mask if self.causal else None)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout, attn_mask=self.mask[:q.size(2), :q.size(2)] if self.causal else None)
         return rearrange(out, "b h n d -> b n (h d)", h=self.n_heads)
 
 class TransformerLayer(nn.Module):
