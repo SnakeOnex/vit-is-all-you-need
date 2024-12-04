@@ -37,7 +37,7 @@ class TiTokEncoder(nn.Module):
         self.vit = ViT(titok_config.enc_vit_config)
         self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
-        out_embd = self.vit(x)
+        out_embd = self.vit(x)[:,:self.latent_tokens]
         latent_embd = self.proj(out_embd)
         return latent_embd
 
@@ -82,11 +82,11 @@ class TiTok(nn.Module):
         self.enc = TiTokEncoder(titok_config)
         self.quant = Quantizer(titok_config)
         self.dec = TiTokDecoder(titok_config)
-    def encode(self, z): return self.quant(self.enc(z))
+    def encode(self, z): return self.quant(self.enc(z))[1]
     def decode(self, z_quant): return self.dec(z_quant)
     def decode_indices(self, indices): return self.dec(self.quant.codebook(indices))
     def forward(self, x):
-        latent_embs = self.enc(x)[:,:self.config.latent_tokens]
+        latent_embs = self.enc(x)
         quantized, indices, quantize_loss = self.quant(latent_embs)
         image_recon = self.dec(quantized)
         return image_recon, indices, quantize_loss
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--train_steps', type=int, default=500000)
     parser.add_argument('--dataset', type=str, default='imagenet')
-    parser.add_argument('--epochs', type=int, default=float('inf'))
+    parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
     args.min_lr = args.lr / 10.
     titok_config = TiTokConfig(args.image_size, args.patch_size, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
@@ -132,7 +132,7 @@ if __name__ == '__main__':
 
     print(f"STATS: enc_params={get_params_str(titok)}")
 
-    best_recon = 0.
+    best_recon = float('inf')
     for epoch in range(args.epochs):
         bar = tqdm.tqdm(train_loader)
         train_loss = 0.
@@ -160,7 +160,7 @@ if __name__ == '__main__':
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
-                    torch.save(titok.state_dict(), f"titok_best_{run_name}.pth")
+                    torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
             if i % 5000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
                 recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]

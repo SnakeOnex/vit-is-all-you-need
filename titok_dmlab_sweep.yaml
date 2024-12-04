@@ -2,12 +2,14 @@ program: train_titok.py
 method: grid
 metric: 
   name: train/recon_loss
-  goal: maximize
+  goal: minimize
 parameters:
+  patch_size:
+    values: [8, 16]
   latent_tokens:
-    values: [8, 16, 32, 64]
+    values: [8, 16, 32]
   codebook_size: 
-    values: [512, 1024]
+    values: [512]
 command:
   - python
   - ${program}
@@ -20,7 +22,7 @@ command:
   - --bs 
   - "128" 
   - --transformer 
-  - "S" 
-  - --lr 
-  - "1e-4"
+  - "S"
+  - --lr
+  - "3e-4"
   - ${args}
