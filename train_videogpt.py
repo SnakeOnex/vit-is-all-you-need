@@ -60,6 +60,10 @@ class VideoGPT(nn.Module):
             next_token = torch.argmax(logits[:, -1], dim=-1, keepdim=True)
             tokens = torch.cat([tokens, next_token], dim=-1)
         return tokens
+    def generate_frames(self, video_tokens, n=1):
+        tokens = rearrange(video_tokens, 'b t n -> b (t n)')
+        tokens = self.generate(tokens, n*self.config.frame_size)
+        return tokens
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -116,8 +120,7 @@ if __name__ == '__main__':
             tokens = tokens[:, :1]
             print(tokens.shape)
             with torch.no_grad(): 
-                out_tokens = video_gpt.generate(rearrange(tokens, 'b t n -> b (t n)'), n=5)
-                print(out_tokens.shape)
+                video_gpt.generate_frames(tokens, n=3)
             exit(0)
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
