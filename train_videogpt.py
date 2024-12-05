@@ -71,6 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--codebook_size', type=int, default=512)
     parser.add_argument('--transformer', type=str, default='S')
     parser.add_argument('--max_frames', type=int, default=4)
+    parser.add_argument('--condition_frames', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
@@ -82,10 +83,11 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
     args.min_lr = args.lr / 10.
+    assert args.condition_frames < args.max_frames
     videogpt_config = VideoGPTConfig(args.frame_size, args.codebook_size, args.transformer, args.max_frames, args.dropout)
 
     project_name = f"videogpt-{args.dataset}"
-    run_name=f"{args.frame_size}_{args.transformer}_{args.codebook_size}"
+    run_name=f"{args.frame_size}_{args.transformer}_{args.codebook_size}_{args.max_frames}frames"
     if args.dataset == 'dmlab':
         train_loader, _ = get_dmlab_video_loaders(args.bs)
         titok_params = torch.load(f"titok_models/titok_{args.dataset}_{args.frame_size}_{args.codebook_size}.pt")
@@ -101,23 +103,24 @@ if __name__ == '__main__':
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
-    print(f"STATS: titok_params={get_params_str(titok)}, video_gpt_params={get_params_str(video_gpt)}")
+    print(f"STATS: train_set={len(train_loader.dataset)} titok_params={get_params_str(titok)}, video_gpt_params={get_params_str(video_gpt)}")
 
     best_recon = 0.
+    steps = 0
     for epoch in range(args.epochs):
         bar = tqdm.tqdm(train_loader)
         st = time.time()
         for i, (videos, _) in enumerate(bar):
             videos = videos.to(device)
-            videos = videos[:, :args.max_frames]
+            offset = torch.randint(0, videos.shape[1] - args.max_frames, (1,)).item()
+            videos = videos[:, offset:offset+args.max_frames]
             B, T, C, H, W = videos.shape
 
-            # 1. encode video into tokens
             with torch.no_grad(): 
                 tokens = titok.encode(rearrange(videos, 'b t c h w -> (b t) c h w'))
             tokens = rearrange(tokens, '(b t) n -> b t n', b=B)
+
             load_time = time.time() - st
-            # exit(0)
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
                 _, loss = video_gpt(tokens)
@@ -125,23 +128,19 @@ if __name__ == '__main__':
             scaler.step(optim)
             scaler.update()
             lr_sched.step()
+            steps += 1
             step_time = time.time() - st - load_time
-            if i % 100 == 0: 
-                wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr'], "train/epoch": epoch})
+            if steps % 100 == 0: 
+                wandb.log({"train/loss": loss.item(), "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr'], "train/epoch": epoch, "train/steps": steps})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f}")
-            if i % 50 == 0: 
+            if steps % 2500 == 0: 
                 video_unrolled = rearrange(videos, 'b t c h w -> b h (t w) c')
                 wandb.log({"video": wandb.Image(video_unrolled[0].detach().cpu().numpy())})
                 with torch.no_grad(): 
-                    gen_tokens = video_gpt.generate_frames(tokens[:,:1], n=3)
-                    gen_tokens = rearrange(gen_tokens, 'b (t n) -> (b t) n', t=T)
-                    gen_video = titok.decode_indices(gen_tokens)
+                    gen_tokens = video_gpt.generate_frames(tokens[:,:args.condition_frames], n=args.max_frames - args.condition_frames)
+                    gen_video = titok.decode_indices(rearrange(gen_tokens, 'b (t n) -> (b t) n', t=T))
                     gen_video = rearrange(gen_video, '(b t) c h w -> b t c h w', b=B)
                     gen_video_unrolled = rearrange(gen_video, 'b t c h w -> b h (t w) c')
                     wandb.log({"gen_video": wandb.Image(gen_video_unrolled[0].detach().cpu().numpy())})
-            #     images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
-            #     recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
-            #     codebook_usage *= 0
-            #     wandb.log({"images": images, "reconstructions": recons})
             st = time.time()
 
