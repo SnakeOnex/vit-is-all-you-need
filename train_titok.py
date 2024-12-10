@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from utils import *
 from train_vit import ViTConfig, ViT
-from datasets import get_imagenet_loaders, get_dmlab_image_loaders
+from datasets import get_imagenet_loaders, get_dmlab_image_loaders, get_minecraft_image_loaders
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -118,6 +118,11 @@ if __name__ == '__main__':
         assert args.image_size == 64
         project_name = 'titok-dmlab'
         train_loader, _ = get_dmlab_image_loaders(args.bs)
+    elif args.dataset == 'minecraft':
+        assert args.image_size == 128
+        project_name = 'titok-minecraft'
+        train_loader, _ = get_minecraft_image_loaders(args.bs)
+
     run_name=f"{args.patch_size}px_{args.image_size}px_{args.transformer}_{args.latent_tokens}_{args.codebook_size}"
 
     wandb.init(project=project_name, name=run_name, config=titok_config.__dict__ | args.__dict__)

@@ -43,6 +43,22 @@ class DmlabDataset(Dataset):
         action = torch.from_numpy(action)
         return video, action
 
+class MinecraftDataset(Dataset):
+    def __init__(self, dataset_path):
+        self.video_paths = []
+        for folder_path in Path(dataset_path).iterdir():
+            for video_path in folder_path.iterdir():
+                if video_path.suffix == '.mp4':
+                    self.video_paths.append(video_path)
+    def __len__(self): return len(self.video_paths)
+    def __getitem__(self, idx):
+        video, audio, info = torchvision.io.read_video(self.video_paths[idx])
+        # video, _ = data['video'], data['actions']
+        video = (video.float() / 255) * 2 - 1
+        video = video.permute(0, 3, 1, 2)
+        # action = torch.from_numpy(action)
+        return video, None
+
 # very simple dataloader that samples random frames from random videos
 def video_dataloader(dataset, batch_size, videos_per_batch=8):
     while True:
@@ -56,6 +72,11 @@ def video_dataloader(dataset, batch_size, videos_per_batch=8):
 
 def get_dmlab_image_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
     dataset = DmlabDataset(dataset_path)
+    loader = video_dataloader(dataset, batch_size)
+    return loader, None
+
+def get_minecraft_image_loaders(batch_size, dataset_path='../teco/minecraft/train/'):
+    dataset = MinecraftDataset(dataset_path)
     loader = video_dataloader(dataset, batch_size)
     return loader, None
 
