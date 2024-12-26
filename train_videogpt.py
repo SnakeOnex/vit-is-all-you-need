@@ -103,7 +103,7 @@ if __name__ == '__main__':
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
-    print(f"STATS: train_set={len(train_loader.dataset)} titok_params={get_params_str(titok)}, video_gpt_params={get_params_str(video_gpt)}")
+    print(f"STATS: titok_params={get_params_str(titok)}, video_gpt_params={get_params_str(video_gpt)}")
 
     best_recon = 0.
     steps = 0
