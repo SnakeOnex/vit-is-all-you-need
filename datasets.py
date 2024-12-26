@@ -59,8 +59,24 @@ class MinecraftDataset(Dataset):
         # action = torch.from_numpy(action)
         return video, None
 
+class ImagesFromVideoDataset(Dataset):
+    def __init__(self, video_dataset, frames_per_video=8):
+        self.video_dataset = video_dataset
+        self.frames_per_video = frames_per_video
+    def __len__(self): return len(self.video_dataset)*1000
+    def __getitem__(self, idx):
+        video, _ = self.video_dataset[idx % len(self.video_dataset)]
+        frames = torch.stack([video[torch.randint(0, video.shape[0], (self.frames_per_video,))]]).squeeze(0)
+        return frames, None
+
+def collate_fn(batch):
+    x, y = zip(*batch)
+    x = torch.stack(x)
+    x = rearrange(x, "b f c h w -> (b f) c h w")
+    return x, None
+
 # very simple dataloader that samples random frames from random videos
-def video_dataloader(dataset, batch_size, videos_per_batch=8):
+def video_dataloader(dataset, batch_size, videos_per_batch=4):
     while True:
         # 1. fetch videos_per_batch videos
         videos = torch.stack([dataset[i][0] for i in np.random.choice(len(dataset), videos_per_batch)])
@@ -72,12 +88,15 @@ def video_dataloader(dataset, batch_size, videos_per_batch=8):
 
 def get_dmlab_image_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
     dataset = DmlabDataset(dataset_path)
-    loader = video_dataloader(dataset, batch_size)
+    dataset = ImagesFromVideoDataset(dataset)
+    # loader = video_dataloader(dataset, batch_size)
+    loader = DataLoader(dataset, batch_size=batch_size//8, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, collate_fn=collate_fn, prefetch_factor=2)
     return loader, None
 
 def get_minecraft_image_loaders(batch_size, dataset_path='../teco/minecraft/train/'):
     dataset = MinecraftDataset(dataset_path)
-    loader = video_dataloader(dataset, batch_size)
+    dataset = ImagesFromVideoDataset(dataset)
+    loader = DataLoader(dataset, batch_size=batch_size//8, shuffle=True, num_workers=8, pin_memory=True, drop_last=True, collate_fn=collate_fn, prefetch_factor=2)
     return loader, None
 
 def get_dmlab_video_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
