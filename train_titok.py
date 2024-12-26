@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from utils import *
 from train_vit import ViTConfig, ViT
 from datasets import get_imagenet_loaders, get_dmlab_image_loaders, get_minecraft_image_loaders
+from vector_quantize_pytorch import FSQ
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -64,7 +65,7 @@ class TiTokDecoder(nn.Module):
         self.vit = ViT(titok_config.dec_vit_config)
         self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
         self.embd_proj = nn.Conv2d(titok_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
-        self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper
+        # self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper (not sure if it's necessary or even beneficial)
     def forward(self, z):
         z = self.quant_proj(z)
         z = rearrange(z, 'b h c -> b c h 1')
@@ -72,7 +73,7 @@ class TiTokDecoder(nn.Module):
         out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.patch_dim, w=self.config.patch_dim)
         image = self.embd_proj(out_embd)
         image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=self.config.patch_size, p2=self.config.patch_size)
-        image = self.conv_out(image)
+        # image = self.conv_out(image)
         return image
 
 class TiTok(nn.Module):
@@ -102,9 +103,10 @@ if __name__ == '__main__':
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--perceptual_weight', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=5000)
-    parser.add_argument('--train_steps', type=int, default=500000)
+    parser.add_argument('--train_steps', type=int, default=1_000_000)
     parser.add_argument('--dataset', type=str, default='imagenet')
     parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
@@ -133,7 +135,8 @@ if __name__ == '__main__':
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
-    lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
+    from perceptual_loss import PerceptualLoss
+    lpips_loss_fn = PerceptualLoss().to(device).eval()
 
     print(f"STATS: enc_params={get_params_str(titok)}")
 
@@ -149,13 +152,14 @@ if __name__ == '__main__':
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
                 image_recon, indices, quantize_loss = titok(images)
-                l1_loss = (image_recon - images).abs().mean()
-                perceptual_loss = lpips_loss_fn(image_recon, images).mean()
+                l1_loss = (image_recon - images).pow(2).mean()
+                perceptual_loss = args.perceptual_weight * lpips_loss_fn(image_recon, images).mean()
                 recon_loss = l1_loss + perceptual_loss
                 loss = recon_loss + quantize_loss
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
+            nn.utils.clip_grad_norm_(titok.parameters(), max_norm=1.0)
             lr_sched.step()
             step_time = time.time() - st - load_time
             codebook_usage[indices] = 1
