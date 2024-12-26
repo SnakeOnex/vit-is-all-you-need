@@ -1,0 +1,25 @@
+program: train_videogpt.py
+method: grid
+metric: 
+  name: train/loss
+  goal: minimize
+parameters:
+  max_
+command:
+  - python
+  - ${program}
+  - --dataset
+  - "dmlab"
+  - --epochs 
+  - "10"
+  - --bs 
+  - "64" 
+  - --transformer 
+  - "S"
+  - --lr
+  - "3e-4"
+  - --frame_size
+  - "16"
+  - --codebook_size
+  - "512"
+  - ${args}

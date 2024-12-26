@@ -1,0 +1,28 @@
+program: train_titok.py
+method: grid
+metric: 
+  name: train/recon_loss
+  goal: minimize
+parameters:
+  patch_size:
+    value: 16
+  latent_tokens:
+    values: [8, 16, 32]
+  codebook_size: 
+    values: [512]
+  transformer:
+    values: ["S", "B"]
+command:
+  - python
+  - ${program}
+  - --dataset
+  - "minecraft"
+  - --epochs 
+  - "10"
+  - --image_size 
+  - "128" 
+  - --bs 
+  - "128" 
+  - --lr
+  - "1e-4"
+  - ${args}
