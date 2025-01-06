@@ -1,8 +1,10 @@
 import torch, torch.nn as nn, torchvision, lpips
+import numpy as np
 import argparse, tqdm, wandb, time
 from einops import rearrange
 from torch.amp import autocast, GradScaler
 from dataclasses import dataclass
+from typing import Union, Tuple
 
 from utils import *
 from train_vit import ViTConfig, ViT
@@ -71,7 +73,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     out: (M, D)
     """
     assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float)
+    omega = np.arange(embed_dim // 2, dtype=float)
     omega /= embed_dim / 2.
     omega = 1. / 10000**omega  # (D/2,)
 
@@ -169,7 +171,7 @@ class Transformer(nn.Module):
 
 class ViTEncoder(nn.Module):
     def __init__(self, image_size: Union[Tuple[int, int], int], patch_size: Union[Tuple[int, int], int],
-                 dim: int, depth: int, heads: int, mlp_dim: int, channels: int = 3, dim_head: int = 64) -> None:
+                 dim: int = 768, depth: int = 12, heads: int = 12, mlp_dim: int = 3072, channels: int = 3, dim_head: int = 64) -> None:
         super().__init__()
         image_height, image_width = image_size if isinstance(image_size, tuple) \
                                     else (image_size, image_size)
@@ -201,7 +203,7 @@ class ViTEncoder(nn.Module):
 
 class ViTDecoder(nn.Module):
     def __init__(self, image_size: Union[Tuple[int, int], int], patch_size: Union[Tuple[int, int], int],
-                 dim: int, depth: int, heads: int, mlp_dim: int, channels: int = 3, dim_head: int = 64) -> None:
+                 dim: int = 768, depth: int = 12, heads: int = 12, mlp_dim: int = 3072, channels: int = 3, dim_head: int = 64) -> None:
         super().__init__()
         image_height, image_width = image_size if isinstance(image_size, tuple) \
                                     else (image_size, image_size)
@@ -253,15 +255,19 @@ class ViTVQGAN(nn.Module):
     def __init__(self, config: ViTVQGANConfig):
         super(ViTVQGAN, self).__init__()
         self.config = config
-        self.encoder = ViTEncoder(config)
+        self.encoder = ViTEncoder(config.image_size, config.patch_size) 
+        self.pre_quant_proj = nn.Linear(768, config.latent_dim)
         self.quant = Quantizer(config)
-        self.decoder = ViTDecoder(config)
+        self.quant_proj = nn.Linear(config.latent_dim, 768)
+        self.decoder = ViTDecoder(config.image_size, config.patch_size)
     def encode(self, z): return self.quant(self.encoder(z))[1]
     def decode(self, z_quant): return self.decoder(z_quant)
     def decode_indices(self, indices): return self.decoder(self.quant.codebook(indices))
     def forward(self, x):
         latent_embs = self.encoder(x)
+        latent_embs = self.pre_quant_proj(latent_embs)
         quantized, indices, quantize_loss = self.quant(latent_embs)
+        quantized = self.quant_proj(quantized)
         image_recon = self.decoder(quantized)
         return image_recon, indices, quantize_loss
 
@@ -277,8 +283,8 @@ if __name__ == '__main__':
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--warmup_steps', type=int, default=5000)
-    parser.add_argument('--train_steps', type=int, default=500000)
+    parser.add_argument('--warmup_steps', type=int, default=10000)
+    parser.add_argument('--train_steps', type=int, default=500_000)
     parser.add_argument('--dataset', type=str, default='imagenet')
     parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
@@ -310,7 +316,7 @@ if __name__ == '__main__':
     from perceptual_loss import PerceptualLoss
     lpips_loss_fn = PerceptualLoss().to(device).eval()
 
-    print(f"STATS: enc_params={get_params_str(titok)}")
+    print(f"STATS: vitvqgan_params={get_params_str(titok)}")
 
     best_recon = float('inf')
     for epoch in range(args.epochs):
