@@ -100,8 +100,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--vq_codebook_size', type=int, default=16384)
     parser.add_argument('--vq_latent_tokens', type=int, default=256)
-    parser.add_argument('--latent_tokens', type=int, default=128)
-    parser.add_argument('--codebook_size', type=int, default=2048)
+    parser.add_argument('--latent_tokens', type=int, default=64)
+    parser.add_argument('--codebook_size', type=int, default=32768)
     parser.add_argument('--latent_dim', type=int, default=12)
     parser.add_argument('--transformer', type=str, default='S')
     parser.add_argument('--bs', type=int, default=32)
@@ -142,13 +142,16 @@ if __name__ == '__main__':
     titok = TiTok(titok_config).to(device)
 
     # DUMMY EXAMPLE
-    # zq, _, info = vq_model.encode(torch.randn((8, 3, 256, 256)).to(device))
-    # print(zq.shape)
-    # vq_indices = rearrange(info[2], '(b z) -> b z', b=8)
-    # print(f"{vq_indices.shape=}")
-    #
-    # recon, indices, q_loss = titok(vq_indices)
-    # print(f"{recon.shape=}, {indices.shape=}, {q_loss=}")
+    zq, _, info = vq_model.encode(torch.randn((8, 3, 256, 256)).to(device))
+    print(zq.shape)
+    vq_indices = rearrange(info[2], '(b z) -> b z', b=8)
+    print(f"{vq_indices.shape=}")
+
+    recon, indices, q_loss = titok(vq_indices)
+    print(f"{recon.shape=}, {indices.shape=}, {q_loss=}")
+    recon_codes = recon.argmax(dim=-1)
+    recon_image = vq_model.decode_code(recon_codes, zq.shape)
+    print(recon_image.shape)
     # exit(0)
 
     optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -171,7 +174,7 @@ if __name__ == '__main__':
             images = images.to(device)
             with torch.no_grad():
                 # codes = vq_model.encode(images)
-                _, _, info = vq_model.encode(images)
+                zq, _, info = vq_model.encode(images)
                 vq_indices = rearrange(info[2], '(b z) -> b z', b=args.bs)
                 # print(f"{vq_indices.shape=}")
             load_time = time.time() - st
@@ -200,11 +203,18 @@ if __name__ == '__main__':
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
                     torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
-            # if i % 5000 == 0: 
-            #     images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
-            #     recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
-            #     codebook_usage *= 0
-            #     wandb.log({"images": images, "reconstructions": recons})
+            if i % 500 == 0: 
+                code_preds = torch.argmax(codes_recon, dim=-1)
+                code_preds = rearrange(code_preds, 'b n -> (b n)')
+                with torch.no_grad():
+                    print(f"{info[2].shape=} {zq.shape=} {code_preds.shape=}")
+                    image_recon = vq_model.decode_code(info[2], zq.shape)[:4]
+                    images_ce_recon = vq_model.decode_code(code_preds, zq.shape)[:4]
+                images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
+                recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
+                ce_recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images_ce_recon[:4]]
+                codebook_usage *= 0
+                wandb.log({"images": images, "reconstructions": recons, "ce_reconstructions": ce_recons})
             st = time.time()
         train_loss /= len(train_loader)
 
