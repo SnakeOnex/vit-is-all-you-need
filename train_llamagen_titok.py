@@ -39,7 +39,6 @@ class TiTokEncoder(nn.Module):
         self.extra_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
         self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
-        print(f"{x.shape=}")
         input_emb = self.tok_emb(x) + self.pos_emb(torch.arange(x.shape[1], device=x.device))
 
         extra_emb = repeat(self.extra_emb.weight, 'n d -> b n d', b=x.shape[0])
@@ -104,7 +103,7 @@ if __name__ == '__main__':
     parser.add_argument('--latent_tokens', type=int, default=128)
     parser.add_argument('--codebook_size', type=int, default=2048)
     parser.add_argument('--latent_dim', type=int, default=12)
-    parser.add_argument('--transformer', type=str, default='B')
+    parser.add_argument('--transformer', type=str, default='S')
     parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -125,7 +124,6 @@ if __name__ == '__main__':
     vq_model.to(device)
 
     if args.dataset == 'imagenet':
-        assert args.image_size == 256
         project_name = 'titok-CE-imagenet'
         train_loader, _ = get_imagenet_loaders(256, args.bs)
     elif args.dataset == 'dmlab':
@@ -159,6 +157,7 @@ if __name__ == '__main__':
 
     from perceptual_loss import PerceptualLoss
     lpips_loss_fn = PerceptualLoss().to(device).eval()
+    loss_fn = nn.CrossEntropyLoss()
 
     print(f"STATS: enc_params={get_params_str(titok)}")
 
@@ -171,14 +170,20 @@ if __name__ == '__main__':
         for i, (images, _) in enumerate(bar):
             images = images.to(device)
             with torch.no_grad():
-                codes = vq_model.encode(images)
+                # codes = vq_model.encode(images)
+                _, _, info = vq_model.encode(images)
+                vq_indices = rearrange(info[2], '(b z) -> b z', b=args.bs)
+                # print(f"{vq_indices.shape=}")
             load_time = time.time() - st
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
-                image_recon, indices, quantize_loss = titok(images)
-                l1_loss = (image_recon - images).pow(2).mean()
-                perceptual_loss = args.perceptual_weight * lpips_loss_fn(image_recon, images).mean()
-                recon_loss = l1_loss + perceptual_loss
+                codes_recon, indices, quantize_loss = titok(vq_indices)
+                # print(f"{codes_recon.shape=}, {indices.shape=}, {quantize_loss.shape=}")
+                # image_recon, indices, quantize_loss = titok(images)
+                # l1_loss = (image_recon - images).pow(2).mean()
+                # perceptual_loss = args.perceptual_weight * lpips_loss_fn(image_recon, images).mean()
+                # recon_loss = l1_loss + perceptual_loss
+                recon_loss = loss_fn(rearrange(codes_recon, 'b n c -> (b n) c'), rearrange(vq_indices, 'b n -> (b n)'))
                 loss = recon_loss + quantize_loss
             scaler.scale(loss).backward()
             scaler.step(optim)
@@ -189,16 +194,17 @@ if __name__ == '__main__':
             codebook_usage[indices] = 1
             if i % 100 == 0: 
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
-                wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
+                # wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
+                wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 bar.set_description(f"e={epoch}: loss={loss.item():.3f} recon_loss={recon_loss.item():.3f} quant_loss={quantize_loss.item():.3f}")
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
                     torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
-            if i % 5000 == 0: 
-                images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
-                recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
-                codebook_usage *= 0
-                wandb.log({"images": images, "reconstructions": recons})
+            # if i % 5000 == 0: 
+            #     images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
+            #     recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
+            #     codebook_usage *= 0
+            #     wandb.log({"images": images, "reconstructions": recons})
             st = time.time()
         train_loss /= len(train_loader)
 
