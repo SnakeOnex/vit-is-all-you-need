@@ -1,6 +1,6 @@
 import torch, torch.nn as nn, torchvision, lpips
 import argparse, tqdm, wandb, time
-from einops import rearrange
+from einops import rearrange, repeat
 from torch.amp import autocast, GradScaler
 from dataclasses import dataclass
 
@@ -34,12 +34,17 @@ class TiTokEncoder(nn.Module):
         super(TiTokEncoder, self).__init__()
         self.latent_tokens = titok_config.latent_tokens
         self.transformer = Transformer(titok_config.trans_config)
-        self.tok_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+        self.tok_emb = nn.Embedding(titok_config.vq_codebook_size, titok_config.n_embd)
         self.pos_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+        self.extra_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
         self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
-        x = self.tok_emb(x) + self.pos_emb(torch.arange(x.shape[1], device=x.device))
-        out_emb = self.transformer(x)[:,:self.latent_tokens]
+        print(f"{x.shape=}")
+        input_emb = self.tok_emb(x) + self.pos_emb(torch.arange(x.shape[1], device=x.device))
+
+        extra_emb = repeat(self.extra_emb.weight, 'n d -> b n d', b=x.shape[0])
+        input_emb = torch.cat([extra_emb, input_emb], dim=1)
+        out_emb = self.transformer(input_emb)[:,:self.latent_tokens]
         latent_emb = self.proj(out_emb)
         return latent_emb
 
@@ -66,10 +71,13 @@ class TiTokDecoder(nn.Module):
         self.transformer = Transformer(titok_config.trans_config)
         self.pos_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
         self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
-        self.emb_proj = nn.Linear(titok_config.n_embd, titok_config.vq_latent_tokens)
-    def forward(self, z):
+        self.emb_proj = nn.Linear(titok_config.n_embd, titok_config.vq_codebook_size)
+        self.mask_tokens = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+    def forward(self, z): # z = (B, latent_tokens, latent_dim)
         z_emb = self.quant_proj(z) + self.pos_emb(torch.arange(z.shape[1], device=z.device))
-        out_emb = self.transformer(z_emb)[:,:self.config.vq_latent_tokens]
+        mask_emb = repeat(self.mask_tokens.weight, 'n d -> b n d', b=z.shape[0])
+        emb = torch.cat([mask_emb, z_emb], dim=1)
+        out_emb = self.transformer(emb)[:,:self.config.vq_latent_tokens]
         logits = self.emb_proj(out_emb)
         return logits
 
@@ -86,14 +94,14 @@ class TiTok(nn.Module):
     def forward(self, x):
         latent_embs = self.enc(x)
         quantized, indices, quantize_loss = self.quant(latent_embs)
-        image_recon = self.dec(quantized)
-        return image_recon, indices, quantize_loss
+        codes_recon = self.dec(quantized)
+        return codes_recon, indices, quantize_loss
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--image_size', type=int, default=128)
-    parser.add_argument('--patch_size', type=int, default=16)
-    parser.add_argument('--latent_tokens', type=int, default=256)
+    parser.add_argument('--vq_codebook_size', type=int, default=16384)
+    parser.add_argument('--vq_latent_tokens', type=int, default=256)
+    parser.add_argument('--latent_tokens', type=int, default=128)
     parser.add_argument('--codebook_size', type=int, default=2048)
     parser.add_argument('--latent_dim', type=int, default=12)
     parser.add_argument('--transformer', type=str, default='B')
@@ -108,7 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
     args.min_lr = args.lr / 10.
-    titok_config = TiTokConfig(args.image_size, args.patch_size, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
+    titok_config = TiTokConfig(args.vq_codebook_size, args.vq_latent_tokens, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
 
     vq_model = VQ_models['VQ-16']()
     vq_ckpt = "vq_ds16_c2i.pt"
@@ -128,11 +136,21 @@ if __name__ == '__main__':
         project_name = 'titok-minecraft'
         train_loader, _ = get_minecraft_image_loaders(args.bs)
 
-    run_name=f"{args.patch_size}px_{args.image_size}px_{args.transformer}_{args.latent_tokens}_{args.codebook_size}"
+    run_name=f"{args.vq_codebook_size}_{args.vq_latent_tokens}vq_{args.transformer}_{args.latent_tokens}_{args.codebook_size}ce_vq"
 
     wandb.init(project=project_name, name=run_name, config=titok_config.__dict__ | args.__dict__)
 
     titok = TiTok(titok_config).to(device)
+
+    # DUMMY EXAMPLE
+    # zq, _, info = vq_model.encode(torch.randn((8, 3, 256, 256)).to(device))
+    # print(zq.shape)
+    # vq_indices = rearrange(info[2], '(b z) -> b z', b=8)
+    # print(f"{vq_indices.shape=}")
+    #
+    # recon, indices, q_loss = titok(vq_indices)
+    # print(f"{recon.shape=}, {indices.shape=}, {q_loss=}")
+    # exit(0)
 
     optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
