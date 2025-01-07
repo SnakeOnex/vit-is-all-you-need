@@ -125,8 +125,9 @@ if __name__ == '__main__':
     vq_model.to(device)
 
     if args.dataset == 'imagenet':
+        assert args.image_size == 256
         project_name = 'titok-CE-imagenet'
-        train_loader, _ = get_imagenet_loaders(args.image_size, args.bs)
+        train_loader, _ = get_imagenet_loaders(256, args.bs)
     elif args.dataset == 'dmlab':
         assert args.image_size == 64
         project_name = 'titok-dmlab'
