@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from utils import *
 from train_vit import ViTConfig, ViT
+from transformer import transformer_configs, Transformer
 from datasets import get_imagenet_loaders, get_dmlab_image_loaders, get_minecraft_image_loaders
 
 from LlamaGen.tokenizer.tokenizer_image.vq_model import VQ_models
@@ -18,30 +19,29 @@ torch.backends.cudnn.deterministic = False
 
 @dataclass
 class TiTokConfig:
-    image_size: int
-    patch_size: int
+    vq_codebook_size: int
+    vq_latent_tokens: int
     latent_tokens: int
     codebook_size: int
     latent_dim: int
     transformer: str
     def __post_init__(self):
-        self.patch_dim = self.image_size // self.patch_size
-        self.n_patches = self.patch_dim**2
-        self.enc_vit_config = ViTConfig(self.image_size, 3, self.patch_size, self.transformer, self.latent_tokens, 0.0)
-        self.n_embd = self.enc_vit_config.trans_config.n_embd
-        self.dec_vit_config = ViTConfig(self.latent_tokens, self.n_embd, 1, self.transformer, self.n_patches, 0.0)
-        self.dec_vit_config.n_patches = self.latent_tokens
+        self.trans_config = transformer_configs[self.transformer](block_size=self.vq_latent_tokens+self.latent_tokens, dropout=0.0)
+        self.n_embd = self.trans_config.n_embd
 
 class TiTokEncoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokEncoder, self).__init__()
         self.latent_tokens = titok_config.latent_tokens
-        self.vit = ViT(titok_config.enc_vit_config)
+        self.transformer = Transformer(titok_config.trans_config)
+        self.tok_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+        self.pos_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
         self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
-        out_embd = self.vit(x)[:,:self.latent_tokens]
-        latent_embd = self.proj(out_embd)
-        return latent_embd
+        x = self.tok_emb(x) + self.pos_emb(torch.arange(x.shape[1], device=x.device))
+        out_emb = self.transformer(x)[:,:self.latent_tokens]
+        latent_emb = self.proj(out_emb)
+        return latent_emb
 
 class Quantizer(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
@@ -63,19 +63,15 @@ class TiTokDecoder(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
         super(TiTokDecoder, self).__init__()
         self.config = titok_config
-        self.vit = ViT(titok_config.dec_vit_config)
+        self.transformer = Transformer(titok_config.trans_config)
+        self.pos_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
         self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
-        self.embd_proj = nn.Conv2d(titok_config.n_embd, 3*titok_config.patch_size**2, kernel_size=1)
-        # self.conv_out = nn.Conv2d(3, 3, 3, padding=1, bias=True) # one more conv as per the original paper (not sure if it's necessary or even beneficial)
+        self.emb_proj = nn.Linear(titok_config.n_embd, titok_config.vq_latent_tokens)
     def forward(self, z):
-        z = self.quant_proj(z)
-        z = rearrange(z, 'b h c -> b c h 1')
-        out_embd = self.vit(z)[:,:self.config.n_patches]
-        out_embd = rearrange(out_embd, 'b (h w) c -> b c h w', h=self.config.patch_dim, w=self.config.patch_dim)
-        image = self.embd_proj(out_embd)
-        image = rearrange(image, 'b (p1 p2 c) h w -> b c (h p1) (w p2)', p1=self.config.patch_size, p2=self.config.patch_size)
-        # image = self.conv_out(image)
-        return image
+        z_emb = self.quant_proj(z) + self.pos_emb(torch.arange(z.shape[1], device=z.device))
+        out_emb = self.transformer(z_emb)[:,:self.config.vq_latent_tokens]
+        logits = self.emb_proj(out_emb)
+        return logits
 
 class TiTok(nn.Module):
     def __init__(self, titok_config: TiTokConfig):
