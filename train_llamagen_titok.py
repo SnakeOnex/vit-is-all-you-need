@@ -35,11 +35,12 @@ class TiTokEncoder(nn.Module):
         self.latent_tokens = titok_config.latent_tokens
         self.transformer = Transformer(titok_config.trans_config)
         self.tok_emb = nn.Embedding(titok_config.vq_codebook_size, titok_config.n_embd)
-        self.pos_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+        # self.pos_emb = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
+        self.pos_emb = nn.Parameter(torch.randn(titok_config.vq_latent_tokens, titok_config.n_embd) * titok_config.n_embd ** -0.5)
         self.extra_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
         self.proj = nn.Linear(titok_config.n_embd, titok_config.latent_dim)
     def forward(self, x):
-        input_emb = self.tok_emb(x) + self.pos_emb(torch.arange(x.shape[1], device=x.device))
+        input_emb = self.tok_emb(x) + self.pos_emb[torch.arange(x.shape[1], device=x.device)]
 
         extra_emb = repeat(self.extra_emb.weight, 'n d -> b n d', b=x.shape[0])
         input_emb = torch.cat([extra_emb, input_emb], dim=1)
@@ -61,6 +62,8 @@ class Quantizer(nn.Module):
         commitment_loss = 0.25 * (quantized.detach() - x).pow(2).mean()
         quantize_loss = codebook_loss + commitment_loss
         quantized = x + (quantized - x).detach() # copy gradients
+        # quantized = x
+
         return quantized, indices, quantize_loss
 
 class TiTokDecoder(nn.Module):
@@ -68,12 +71,13 @@ class TiTokDecoder(nn.Module):
         super(TiTokDecoder, self).__init__()
         self.config = titok_config
         self.transformer = Transformer(titok_config.trans_config)
-        self.pos_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
+        # self.pos_emb = nn.Embedding(titok_config.latent_tokens, titok_config.n_embd)
+        self.pos_emb = nn.Parameter(torch.randn(titok_config.latent_tokens, titok_config.n_embd) * titok_config.n_embd ** -0.5)
         self.quant_proj = nn.Linear(titok_config.latent_dim, titok_config.n_embd)
         self.emb_proj = nn.Linear(titok_config.n_embd, titok_config.vq_codebook_size)
         self.mask_tokens = nn.Embedding(titok_config.vq_latent_tokens, titok_config.n_embd)
     def forward(self, z): # z = (B, latent_tokens, latent_dim)
-        z_emb = self.quant_proj(z) + self.pos_emb(torch.arange(z.shape[1], device=z.device))
+        z_emb = self.quant_proj(z) + self.pos_emb[torch.arange(z.shape[1], device=z.device)]
         mask_emb = repeat(self.mask_tokens.weight, 'n d -> b n d', b=z.shape[0])
         emb = torch.cat([mask_emb, z_emb], dim=1)
         out_emb = self.transformer(emb)[:,:self.config.vq_latent_tokens]
@@ -87,6 +91,8 @@ class TiTok(nn.Module):
         self.enc = TiTokEncoder(titok_config)
         self.quant = Quantizer(titok_config)
         self.dec = TiTokDecoder(titok_config)
+
+        self.apply(self._init_weights)
     def encode(self, z): return self.quant(self.enc(z))[1]
     def decode(self, z_quant): return self.dec(z_quant)
     def decode_indices(self, indices): return self.dec(self.quant.codebook(indices))
@@ -95,13 +101,26 @@ class TiTok(nn.Module):
         quantized, indices, quantize_loss = self.quant(latent_embs)
         codes_recon = self.dec(quantized)
         return codes_recon, indices, quantize_loss
+    def _init_weights(self, module):
+        """ Initialize the weights.
+            :param:
+                module -> torch.nn.Module: module to initialize
+        """
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv1d) or isinstance(module, nn.Conv2d):
+            module.weight.data = nn.init.trunc_normal_(module.weight.data, mean=0.0, std=0.02)
+            if module.bias is not None: module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data = nn.init.trunc_normal_(module.weight.data, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--vq_codebook_size', type=int, default=16384)
     parser.add_argument('--vq_latent_tokens', type=int, default=256)
-    parser.add_argument('--latent_tokens', type=int, default=64)
-    parser.add_argument('--codebook_size', type=int, default=32768)
+    parser.add_argument('--latent_tokens', type=int, default=256)
+    parser.add_argument('--codebook_size', type=int, default=16384)
     parser.add_argument('--latent_dim', type=int, default=12)
     parser.add_argument('--transformer', type=str, default='S')
     parser.add_argument('--bs', type=int, default=32)
@@ -117,8 +136,19 @@ if __name__ == '__main__':
     args.min_lr = args.lr / 10.
     titok_config = TiTokConfig(args.vq_codebook_size, args.vq_latent_tokens, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
 
-    vq_model = VQ_models['VQ-16']()
-    vq_ckpt = "vq_ds16_c2i.pt"
+    if args.vq_latent_tokens == 256:
+        vq_model = VQ_models['VQ-16']()
+        vq_ckpt = "vq_ds16_c2i.pt"
+    elif args.vq_latent_tokens == 1024:
+        vq_model = VQ_models['VQ-8'](codebook_size=args.vq_codebook_size)
+        if args.vq_codebook_size == 16384:
+            vq_ckpt = "vq_ds8_c2i.pt"
+        elif args.vq_codebook_size == 1024:
+            vq_ckpt = "vq_ds8_c2i_1024.pt"
+    elif args.vq_latent_tokens == 4096:
+        vq_model = VQ_models['VQ-4'](codebook_size=args.vq_codebook_size)
+        vq_ckpt = "vq_ds4_c2i.pt"
+
     vq_model.load_state_dict(torch.load(vq_ckpt, map_location="cpu")["model"])
     vq_model.eval()
     vq_model.to(device)
@@ -203,7 +233,7 @@ if __name__ == '__main__':
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
                     torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
-            if i % 500 == 0: 
+            if i % 5000 == 0: 
                 code_preds = torch.argmax(codes_recon, dim=-1)
                 code_preds = rearrange(code_preds, 'b n -> (b n)')
                 with torch.no_grad():
