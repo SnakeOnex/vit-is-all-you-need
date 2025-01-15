@@ -124,6 +124,7 @@ if __name__ == '__main__':
     parser.add_argument('--latent_dim', type=int, default=12)
     parser.add_argument('--transformer', type=str, default='S')
     parser.add_argument('--bs', type=int, default=32)
+    parser.add_argument('--micro_steps', type=int, default=1)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--perceptual_weight', type=float, default=1.0)
@@ -155,15 +156,15 @@ if __name__ == '__main__':
 
     if args.dataset == 'imagenet':
         project_name = 'titok-CE-imagenet'
-        train_loader, _ = get_imagenet_loaders(256, args.bs)
+        train_loader, _ = get_imagenet_loaders(256, args.bs // args.micro_steps)
     elif args.dataset == 'dmlab':
         assert args.image_size == 64
         project_name = 'titok-dmlab'
-        train_loader, _ = get_dmlab_image_loaders(args.bs)
+        train_loader, _ = get_dmlab_image_loaders(args.bs // args.micro_steps)
     elif args.dataset == 'minecraft':
         assert args.image_size == 128
         project_name = 'titok-minecraft'
-        train_loader, _ = get_minecraft_image_loaders(args.bs)
+        train_loader, _ = get_minecraft_image_loaders(args.bs // args.micro_steps)
 
     run_name=f"{args.vq_codebook_size}_{args.vq_latent_tokens}vq_{args.transformer}_{args.latent_tokens}_{args.codebook_size}ce_vq"
 
@@ -172,17 +173,16 @@ if __name__ == '__main__':
     titok = TiTok(titok_config).to(device)
 
     # DUMMY EXAMPLE
-    zq, _, info = vq_model.encode(torch.randn((8, 3, 256, 256)).to(device))
-    print(zq.shape)
-    vq_indices = rearrange(info[2], '(b z) -> b z', b=8)
-    print(f"{vq_indices.shape=}")
-
-    recon, indices, q_loss = titok(vq_indices)
-    print(f"{recon.shape=}, {indices.shape=}, {q_loss=}")
-    recon_codes = recon.argmax(dim=-1)
-    recon_image = vq_model.decode_code(recon_codes, zq.shape)
-    print(recon_image.shape)
-    # exit(0)
+    # zq, _, info = vq_model.encode(torch.randn((8, 3, 256, 256)).to(device))
+    # print(zq.shape)
+    # vq_indices = rearrange(info[2], '(b z) -> b z', b=8)
+    # print(f"{vq_indices.shape=}")
+    #
+    # recon, indices, q_loss = titok(vq_indices)
+    # print(f"{recon.shape=}, {indices.shape=}, {q_loss=}")
+    # recon_codes = recon.argmax(dim=-1)
+    # recon_image = vq_model.decode_code(recon_codes, zq.shape)
+    # print(recon_image.shape)
 
     optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
@@ -200,32 +200,33 @@ if __name__ == '__main__':
         train_loss = 0.
         codebook_usage = torch.zeros([titok_config.codebook_size], device=device)
         st = time.time()
-        for i, (images, _) in enumerate(bar):
+
+        step = 0
+        micro_step = 0
+        for images, _ in bar:
             images = images.to(device)
             with torch.no_grad():
-                # codes = vq_model.encode(images)
                 zq, _, info = vq_model.encode(images)
-                vq_indices = rearrange(info[2], '(b z) -> b z', b=args.bs)
-                # print(f"{vq_indices.shape=}")
+                vq_indices = rearrange(info[2], '(b z) -> b z', b=args.bs // args.micro_steps)
             load_time = time.time() - st
             optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
                 codes_recon, indices, quantize_loss = titok(vq_indices)
-                # print(f"{codes_recon.shape=}, {indices.shape=}, {quantize_loss.shape=}")
-                # image_recon, indices, quantize_loss = titok(images)
-                # l1_loss = (image_recon - images).pow(2).mean()
-                # perceptual_loss = args.perceptual_weight * lpips_loss_fn(image_recon, images).mean()
-                # recon_loss = l1_loss + perceptual_loss
                 recon_loss = loss_fn(rearrange(codes_recon, 'b n c -> (b n) c'), rearrange(vq_indices, 'b n -> (b n)'))
                 loss = recon_loss + quantize_loss
             scaler.scale(loss).backward()
+            loss /= args.micro_steps
+            micro_step += 1
+            if micro_step != args.micro_steps: continue
+            else: micro_step = 0
+
             scaler.step(optim)
             scaler.update()
             nn.utils.clip_grad_norm_(titok.parameters(), max_norm=1.0)
             lr_sched.step()
             step_time = time.time() - st - load_time
             codebook_usage[indices] = 1
-            if i % 100 == 0: 
+            if step % 100 == 0: 
                 codebook_usage_val = codebook_usage.sum().item() / titok_config.codebook_size
                 # wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/perceptual_loss": perceptual_loss.item(), "train/l1_loss": l1_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
                 wandb.log({"train/epoch": epoch, "train/loss": loss.item(), "train/recon_loss": recon_loss.item(), "train/quant_loss": quantize_loss.item(), "train/codebook_usage": codebook_usage_val, "benchmark/load_time": load_time, "benchmark/step_time": step_time, "train/lr": optim.param_groups[0]['lr']})
@@ -233,7 +234,7 @@ if __name__ == '__main__':
                 if recon_loss.item() < best_recon:
                     best_recon = recon_loss.item()
                     torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
-            if i % 5000 == 0: 
+            if step % 5000 == 0: 
                 code_preds = torch.argmax(codes_recon, dim=-1)
                 code_preds = rearrange(code_preds, 'b n -> (b n)')
                 with torch.no_grad():
@@ -246,5 +247,6 @@ if __name__ == '__main__':
                 codebook_usage *= 0
                 wandb.log({"images": images, "reconstructions": recons, "ce_reconstructions": ce_recons})
             st = time.time()
+            step += 1
         train_loss /= len(train_loader)
 
