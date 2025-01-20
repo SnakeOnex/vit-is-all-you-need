@@ -255,7 +255,6 @@ class TiTokEncoder(nn.Module):
         batch_size = pixel_values.shape[0]
         x = pixel_values
         x = self.patch_embed(x)
-        print(f"({pixel_values.shape=}) -> ({x.shape=})")
         x = x.reshape(x.shape[0], x.shape[1], -1)
         x = x.permute(0, 2, 1) # shape = [*, grid ** 2, width]
         # class embeddings and positional embeddings
