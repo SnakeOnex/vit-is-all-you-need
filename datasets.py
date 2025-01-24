@@ -38,8 +38,8 @@ class DmlabDataset(Dataset):
     def __getitem__(self, idx):
         data = np.load(self.video_paths[idx])
         video, action = data['video'], data['actions']
-        video = (torch.from_numpy(video).float() / 255) * 2 - 1
-        video = video.permute(0, 3, 1, 2)
+        # video = (torch.from_numpy(video).float() / 255) * 2 - 1
+        # video = video.permute(0, 3, 1, 2)
         action = torch.from_numpy(action)
         return video, action
 
