@@ -21,7 +21,8 @@ import sys
 import time
 
 import webdataset as wds
-from datasets import load_dataset
+# from datasets import load_dataset
+from datasets import DmlabDataset
 
 
 def convert_imagenet_to_wds(output_dir, max_train_samples_per_shard, max_val_samples_per_shard):
@@ -95,11 +96,21 @@ def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_trai
 if __name__ == "__main__":
     # create parase object
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, required=True, help="Path to the output directory.")
-    parser.add_argument("--max_train_samples_per_shard", type=int, default=4000, help="Path to the output directory.")
-    parser.add_argument("--max_val_samples_per_shard", type=int, default=1000, help="Path to the output directory.")
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--max_train_samples_per_shard", type=int, default=4000)
+    parser.add_argument("--max_val_samples_per_shard", type=int, default=1000)
+    parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument("--keep_every", type=int, default=1)
     args = parser.parse_args()
+
+    if args.dataset == "dmlab":
+        dataset = DmlabDataset("../teco/dmlab/train/")
+        print(dataset)
+
+    exit(0)
 
     # create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    convert_imagenet_to_wds(args.output_dir, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
+    convert_video_dataset_to_wds(args.output_dir, dataset, keep_every, name, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
+
+    # convert_imagenet_to_wds(args.output_dir, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
