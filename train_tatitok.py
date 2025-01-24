@@ -26,7 +26,7 @@ class TiTokConfig:
     codebook_size: int
     latent_dim: int
     transformer: str
-    use_l2_norm: bool = False
+    use_l2_norm: bool = True
 
 class TiTok(nn.Module):
     def __init__(self, config):
@@ -92,8 +92,28 @@ class TiTok(nn.Module):
         decoded = self.decode(z_quantized)
         return decoded, result_dict
 
+def make_optim(model, args):
+    # Exclude terms we may not want to apply weight decay.
+    exclude = (lambda n, p: p.ndim < 2 or "ln" in n or "bias" in n or 'latent_tokens' in n 
+               or 'mask_token' in n or 'embedding' in n or 'norm' in n or 'gamma' in n or 'embed' in n)
+    include = lambda n, p: not exclude(n, p)
+    named_parameters = list(model.named_parameters())
+    gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
+    rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": gain_or_bias_params, "weight_decay": 0.},
+            {"params": rest_params, "weight_decay": args.weight_decay},
+        ],
+        lr=args.lr,
+        betas=(0.9, 0.999)
+    )
+    return optimizer
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--patch_size', type=int, default=16)
     parser.add_argument('--latent_tokens', type=int, default=256)
     parser.add_argument('--codebook_size', type=int, default=16384)
     parser.add_argument('--latent_dim', type=int, default=12)
@@ -102,46 +122,50 @@ if __name__ == '__main__':
     parser.add_argument('--micro_steps', type=int, default=1)
     parser.add_argument('--mixed', type=bool, default=True)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--perceptual_weight', type=float, default=1.0)
+    parser.add_argument('--perceptual_weight', type=float, default=1.1)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--warmup_steps', type=int, default=5000)
+    parser.add_argument('--warmup_steps', type=int, default=10000)
     parser.add_argument('--train_steps', type=int, default=1_000_000)
     parser.add_argument('--dataset', type=str, default='imagenet')
     parser.add_argument('--epochs', type=int, default=100000)
     args = parser.parse_args()
     args.min_lr = args.lr / 10.
-    titok_config = TiTokConfig(256, 16, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
-
 
     if args.dataset == 'imagenet':
         project_name = 'titok-single-imagenet'
-        train_loader, _ = get_imagenet_loaders(256, args.bs // args.micro_steps)
+        args.image_size = 256
+        train_loader, _ = get_imagenet_loaders(args.image_size, args.bs // args.micro_steps)
     elif args.dataset == 'dmlab':
         assert args.image_size == 64
         project_name = 'titok-single-dmlab'
+        args.image_size = 64
         train_loader, _ = get_dmlab_image_loaders(args.bs // args.micro_steps)
     elif args.dataset == 'minecraft':
-        assert args.image_size == 128
+        args.image_size = 128
         project_name = 'titok-single-minecraft'
         train_loader, _ = get_minecraft_image_loaders(args.bs // args.micro_steps)
+
+    titok_config = TiTokConfig(args.image_size, args.patch_size, args.latent_tokens, args.codebook_size, args.latent_dim, args.transformer)
 
     run_name=f"{args.transformer}_{args.latent_tokens}_{args.codebook_size}"
 
     wandb.init(project=project_name, name=run_name, config=titok_config.__dict__ | args.__dict__)
 
     titok = TiTok(titok_config).to(device)
+    wandb.watch(titok)
 
     # DUMMY EXAMPLE
     # zq, results_dict = titok(torch.randn((8, 3, 256, 256)).to(device))
     # print(results_dict.keys())
     # print(zq.shape)
 
-    optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # optim = torch.optim.AdamW(titok.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
+    optim = make_optim(titok, args)
     lr_sched = get_lr_scheduler(optim, args.warmup_steps, args.train_steps, args.min_lr)
     scaler = GradScaler(enabled=args.mixed)
 
     from perceptual_loss import PerceptualLoss
-    lpips_loss_fn = PerceptualLoss().to(device).eval()
+    lpips_loss_fn = PerceptualLoss("lpips-convnext_s-1.0-0.1").to(device).eval()
     loss_fn = nn.MSELoss()
 
     print(f"STATS: enc_params={get_params_str(titok)}")
@@ -158,23 +182,24 @@ if __name__ == '__main__':
         for images, _ in bar:
             images = images.to(device)
             load_time = time.time() - st
-            optim.zero_grad()
             with autocast("cuda", enabled=args.mixed):
-                images_recon, results_dict = titok(images)
+                image_recon, results_dict = titok(images)
                 quantize_loss = results_dict['quantizer_loss']
-                perceptual_loss = lpips_loss_fn(images_recon, images)
-                recon_loss = loss_fn(images_recon, images) + args.perceptual_weight * perceptual_loss
-                loss = quantize_loss + recon_loss
+                l1_loss = (image_recon - images).pow(2).mean()
+                perceptual_loss = args.perceptual_weight * lpips_loss_fn(image_recon, images).mean()
+                recon_loss = l1_loss + perceptual_loss
+                loss = recon_loss + quantize_loss
             scaler.scale(loss).backward()
             loss /= args.micro_steps
             micro_step += 1
             if micro_step != args.micro_steps: continue
             else: micro_step = 0
 
+            nn.utils.clip_grad_norm_(titok.parameters(), max_norm=1.0)
             scaler.step(optim)
             scaler.update()
-            nn.utils.clip_grad_norm_(titok.parameters(), max_norm=1.0)
             lr_sched.step()
+            optim.zero_grad()
             step_time = time.time() - st - load_time
             codebook_usage[results_dict["min_encoding_indices"].flatten()] = 1
             if step % 100 == 0: 
@@ -187,7 +212,7 @@ if __name__ == '__main__':
                     torch.save({"config": titok_config, "state_dict": titok.state_dict()}, f"titok_models/titok_{args.dataset}_{args.latent_tokens}_{args.codebook_size}.pt")
             if step % 5000 == 0: 
                 images = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images[:4]]
-                recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in images_recon[:4]]
+                recons = [wandb.Image(img.permute(1, 2, 0).detach().cpu().numpy()) for img in image_recon[:4]]
                 codebook_usage *= 0
                 wandb.log({"images": images, "reconstructions": recons})
             st = time.time()
