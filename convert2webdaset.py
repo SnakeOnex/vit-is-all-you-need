@@ -19,6 +19,8 @@ import argparse
 import os
 import sys
 import time
+import tqdm
+from PIL import Image
 
 import webdataset as wds
 # from datasets import load_dataset
@@ -59,38 +61,42 @@ def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_trai
     assert not os.path.exists(os.path.join(output_dir, f"{name}-train-000000.tar"))
     assert not os.path.exists(os.path.join(output_dir, f"{name}-val-000000.tar"))
 
-    opat = os.path.join(output_dir, "imagenet-train-%06d.tar")
+    opat = os.path.join(output_dir, f"{name}-train-%06d.tar")
     output = wds.ShardWriter(opat, maxcount=max_train_samples_per_shard)
     # dataset = load_dataset("imagenet-1k", streaming=True, split="train", use_auth_token=True)
     now = time.time()
-    for i, (video, actions) in enumerate(dataset):
-        print(f"original video shape: {video.shape}")
+    frame_counter = 0
+    for i, (video, actions) in enumerate(tqdm.tqdm(dataset)):
+        if i == int(len(dataset) * 0.9):
+            print("Switching to val set", file=sys.stderr)
+            output.close()
+            output = wds.ShardWriter(opat.replace("train", "val"), maxcount=max_val_samples_per_shard)
+            frame_counter = 0
+
         video = video[::keep_every]
         actions = actions[::keep_every]
-        print(f"video shape: {video.shape}")
-        exit(0)
-
-
-        if i % max_train_samples_per_shard == 0:
-            print(i, file=sys.stderr)
-        img, label = example["image"], example["label"]
-        output.write({"__key__": "%08d" % i, "jpg": img.convert("RGB"), "cls": label})
+        for i in range(video.shape[0]):
+            if frame_counter % max_train_samples_per_shard == 0:
+                print(frame_counter, file=sys.stderr)
+            img, label = video[i], actions[i]
+            output.write({"__key__": "%08d" % frame_counter, "jpg": Image.fromarray(img)})
+            frame_counter += 1
     output.close()
     time_taken = time.time() - now
-    print(f"Wrote {i+1} train examples in {time_taken // 3600} hours.")
+    print(f"Wrote {frame_counter+1} train examples in {time_taken // 3600} hours.")
 
-    opat = os.path.join(output_dir, "imagenet-val-%06d.tar")
-    output = wds.ShardWriter(opat, maxcount=max_val_samples_per_shard)
-    dataset = load_dataset("imagenet-1k", streaming=True, split="validation", use_auth_token=True)
-    now = time.time()
-    for i, example in enumerate(dataset):
-        if i % max_val_samples_per_shard == 0:
-            print(i, file=sys.stderr)
-        img, label = example["image"], example["label"]
-        output.write({"__key__": "%08d" % i, "jpg": img.convert("RGB"), "cls": label})
-    output.close()
-    time_taken = time.time() - now
-    print(f"Wrote {i+1} val examples in {time_taken // 60} min.")
+    # opat = os.path.join(output_dir, "imagenet-val-%06d.tar")
+    # output = wds.ShardWriter(opat, maxcount=max_val_samples_per_shard)
+    # dataset = load_dataset("imagenet-1k", streaming=True, split="validation", use_auth_token=True)
+    # now = time.time()
+    # for i, example in enumerate(dataset):
+    #     if i % max_val_samples_per_shard == 0:
+    #         print(i, file=sys.stderr)
+    #     img, label = example["image"], example["label"]
+    #     output.write({"__key__": "%08d" % i, "jpg": img.convert("RGB"), "cls": label})
+    # output.close()
+    # time_taken = time.time() - now
+    # print(f"Wrote {i+1} val examples in {time_taken // 60} min.")
 
 
 if __name__ == "__main__":
@@ -100,17 +106,16 @@ if __name__ == "__main__":
     parser.add_argument("--max_train_samples_per_shard", type=int, default=4000)
     parser.add_argument("--max_val_samples_per_shard", type=int, default=1000)
     parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument("--keep_every", type=int, default=1)
+    parser.add_argument("--keep_every", type=int, default=60)
     args = parser.parse_args()
 
     if args.dataset == "dmlab":
         dataset = DmlabDataset("../teco/dmlab/train/")
-        print(dataset)
-
-    exit(0)
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
 
     # create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    convert_video_dataset_to_wds(args.output_dir, dataset, keep_every, name, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
+    convert_video_dataset_to_wds(args.output_dir, dataset, args.keep_every, args.dataset, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
 
     # convert_imagenet_to_wds(args.output_dir, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
