@@ -20,11 +20,12 @@ import os
 import sys
 import time
 import tqdm
+import numpy as np
 from PIL import Image
 
 import webdataset as wds
 # from datasets import load_dataset
-from datasets import DmlabDataset
+from datasets import DmlabDataset, MinecraftDataset
 
 
 def convert_imagenet_to_wds(output_dir, max_train_samples_per_shard, max_val_samples_per_shard):
@@ -57,7 +58,7 @@ def convert_imagenet_to_wds(output_dir, max_train_samples_per_shard, max_val_sam
     time_taken = time.time() - now
     print(f"Wrote {i+1} val examples in {time_taken // 60} min.")
 
-def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_train_samples_per_shard, max_val_samples_per_shard):
+def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_train_samples_per_shard, max_val_samples_per_shard, stack_frames):
     assert not os.path.exists(os.path.join(output_dir, f"{name}-train-000000.tar"))
     assert not os.path.exists(os.path.join(output_dir, f"{name}-val-000000.tar"))
 
@@ -73,12 +74,22 @@ def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_trai
             output = wds.ShardWriter(opat.replace("train", "val"), maxcount=max_val_samples_per_shard)
             frame_counter = 0
 
-        video = video[::keep_every]
-        actions = actions[::keep_every]
-        for i in range(video.shape[0]):
+        # video = video[::keep_every]
+        # actions = actions[::keep_every]
+        for i in range(0, video.shape[0]-stack_frames, keep_every):
             if frame_counter % max_train_samples_per_shard == 0:
                 print(frame_counter, file=sys.stderr)
-            img, label = video[i], actions[i]
+
+            images = []
+            labels = []
+            for j in range(stack_frames):
+                images.append(video[i+j])
+                labels.append(actions[i+j])
+
+            # cat images side by side (in the width dimension)
+            img = np.concatenate(images, axis=1)
+            label = np.array(labels)
+
             output.write({"__key__": "%08d" % frame_counter, "jpg": Image.fromarray(img)})
             frame_counter += 1
     output.close()
@@ -107,15 +118,18 @@ if __name__ == "__main__":
     parser.add_argument("--max_val_samples_per_shard", type=int, default=1000)
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--keep_every", type=int, default=60)
+    parser.add_argument("--stack_frames", type=int, default=1)
     args = parser.parse_args()
 
     if args.dataset == "dmlab":
         dataset = DmlabDataset("../teco/dmlab/train/")
+    elif args.dataset == "minecraft":
+        dataset = MinecraftDataset("../teco/minecraft/train")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
     # create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    convert_video_dataset_to_wds(args.output_dir, dataset, args.keep_every, args.dataset, args.max_train_samples_per_shard, args.max_val_samples_per_shard)
+    convert_video_dataset_to_wds(args.output_dir, dataset, args.keep_every, args.dataset, args.max_train_samples_per_shard, args.max_val_samples_per_shard, args.stack_frames)
 
     # convert_imagenet_to_wds(args.output_dir, args.max_train_samples_per_shard, args.max_val_samples_per_shard)

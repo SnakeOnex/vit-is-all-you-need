@@ -39,6 +39,8 @@ class DmlabDataset(Dataset):
         data = np.load(self.video_paths[idx])
         video, action = data['video'], data['actions']
         # video = (torch.from_numpy(video).float() / 255) * 2 - 1
+        # video = (torch.from_numpy(video).float() / 255)
+        # video = torch.from_numpy(video)
         # video = video.permute(0, 3, 1, 2)
         action = torch.from_numpy(action)
         return video, action
@@ -53,11 +55,13 @@ class MinecraftDataset(Dataset):
     def __len__(self): return len(self.video_paths)
     def __getitem__(self, idx):
         video, audio, info = torchvision.io.read_video(self.video_paths[idx])
-        # video, _ = data['video'], data['actions']
-        video = (video.float() / 255) * 2 - 1
-        video = video.permute(0, 3, 1, 2)
+        video = video[:300]
+        # video = (video.float() / 255) * 2 - 1
+        # video = video.permute(0, 3, 1, 2)
         # action = torch.from_numpy(action)
-        return video, None
+        video = video.numpy()
+        action = torch.zeros(video.shape[0])
+        return video, action
 
 class ImagesFromVideoDataset(Dataset):
     def __init__(self, video_dataset, frames_per_video=8):
