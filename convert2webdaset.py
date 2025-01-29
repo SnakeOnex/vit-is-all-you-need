@@ -25,7 +25,7 @@ from PIL import Image
 
 import webdataset as wds
 # from datasets import load_dataset
-from datasets import DmlabDataset, MinecraftDataset
+from datasets import DmlabDataset, MinecraftDataset, UCF_101_Dataset
 
 
 def convert_imagenet_to_wds(output_dir, max_train_samples_per_shard, max_val_samples_per_shard):
@@ -67,30 +67,25 @@ def convert_video_dataset_to_wds(output_dir, dataset, keep_every, name, max_trai
     # dataset = load_dataset("imagenet-1k", streaming=True, split="train", use_auth_token=True)
     now = time.time()
     frame_counter = 0
-    for i, (video, actions) in enumerate(tqdm.tqdm(dataset)):
+    for i, (video, label) in enumerate(tqdm.tqdm(dataset)):
         if i == int(len(dataset) * 0.9):
             print("Switching to val set", file=sys.stderr)
             output.close()
             output = wds.ShardWriter(opat.replace("train", "val"), maxcount=max_val_samples_per_shard)
             frame_counter = 0
 
-        # video = video[::keep_every]
-        # actions = actions[::keep_every]
-        for i in range(0, video.shape[0]-stack_frames, keep_every):
+        for i in range(0, video.shape[0]-stack_frames, max(keep_every, stack_frames)):
             if frame_counter % max_train_samples_per_shard == 0:
                 print(frame_counter, file=sys.stderr)
 
             images = []
-            labels = []
             for j in range(stack_frames):
                 images.append(video[i+j])
-                labels.append(actions[i+j])
 
             # cat images side by side (in the width dimension)
             img = np.concatenate(images, axis=1)
-            label = np.array(labels)
 
-            output.write({"__key__": "%08d" % frame_counter, "jpg": Image.fromarray(img)})
+            output.write({"__key__": "%08d" % frame_counter, "jpg": Image.fromarray(img), "cls": label})
             frame_counter += 1
     output.close()
     time_taken = time.time() - now
@@ -125,6 +120,8 @@ if __name__ == "__main__":
         dataset = DmlabDataset("../teco/dmlab/train/")
     elif args.dataset == "minecraft":
         dataset = MinecraftDataset("../teco/minecraft/train")
+    elif args.dataset == "ucf101":
+        dataset = UCF_101_Dataset("/mnt/data/vras/data/ucf_101/train")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

@@ -63,6 +63,28 @@ class MinecraftDataset(Dataset):
         action = torch.zeros(video.shape[0])
         return video, action
 
+class UCF_101_Dataset(Dataset):
+    def __init__(self, dataset_path):
+        self.video_paths = []
+        self.classes = []
+        for folder_path in Path(dataset_path).iterdir():
+            self.classes.append(folder_path.name)
+            for video_path in folder_path.iterdir():
+                if video_path.suffix == '.avi':
+                    self.video_paths.append({"video_path":video_path, "class":folder_path.name})
+        self.classes = sorted(self.classes)
+        self.class_to_idx = {c:i for i, c in enumerate(self.classes)}
+    def __len__(self): return len(self.video_paths)
+    def __getitem__(self, idx):
+        video, audio, info = torchvision.io.read_video(self.video_paths[idx]["video_path"])
+
+        # video = (video.float() / 255) * 2 - 1
+        # video = video.permute(0, 3, 1, 2)
+        # action = torch.from_numpy(action)
+        video = video.numpy()
+        action = torch.zeros(video.shape[0])
+        return video, self.class_to_idx[self.video_paths[idx]["class"]]
+
 class ImagesFromVideoDataset(Dataset):
     def __init__(self, video_dataset, frames_per_video=8):
         self.video_dataset = video_dataset
@@ -107,3 +129,17 @@ def get_dmlab_video_loaders(batch_size, dataset_path='../teco/dmlab/train/'):
     dataset = DmlabDataset(dataset_path)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
     return loader, None
+
+
+if __name__ == "__main__":
+    ucf_dataset = UCF_101_Dataset('/mnt/data/vras/data/ucf_101/train')
+
+    print(len(ucf_dataset))
+
+    for _ in range(100):
+        i = np.random.randint(len(ucf_dataset))
+        video, label = ucf_dataset[i]
+        print(f"{video.shape=}, {label=}")
+
+
+
